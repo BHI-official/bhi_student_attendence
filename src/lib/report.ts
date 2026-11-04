@@ -1,7 +1,7 @@
 import "server-only";
 import { PDFDocument, PDFString, StandardFonts, rgb, type PDFImage, type PDFPage, type PDFFont } from "pdf-lib";
 import {
-  AlignmentType, BorderStyle, Document, ExternalHyperlink, Footer, Header, HeadingLevel, ImageRun, Packer, PageBreak, PageNumber,
+  AlignmentType, BorderStyle, ShadingType, Document, ExternalHyperlink, Footer, Header, HeadingLevel, ImageRun, Packer, PageBreak, PageNumber,
   Paragraph, Table, TableCell, TableRow, TextRun, VerticalAlign, WidthType,
 } from "docx";
 import { SCHOOL } from "./brand";
@@ -149,14 +149,19 @@ async function pdfMonth(c: PdfCtx, sheet: SheetData) {
   y -= 6;
 
   const cols = [{ t: "", w: 62 }, { t: "DATE", w: 62 }, { t: "START TIME", w: 62 }, { t: "END TIME", w: 62 }, { t: "HOURS", w: 44 }, { t: "STUDENT SIGNATURE", w: 120 }, { t: "STAFF SIGNATURE", w: 120 }];
-  y -= 16;
+  // Column headings as on the screen: bold on a light band, centred.
+  const headH = 20, headSize = 8.5;
+  y -= headH;
   let x = L;
-  for (const col of cols) { box(x, y, col.w, 16); text(page, col.t, x + 3, y + 5, 7, bold); x += col.w; }
+  for (const col of cols) {
+    page.drawRectangle({ x, y, width: col.w, height: headH, color: rgb(0.965, 0.973, 0.984), borderWidth: 0.8, borderColor: black });
+    text(page, col.t, x + (col.w - bold.widthOfTextAtSize(col.t, headSize)) / 2, y + 7, headSize, bold);
+    x += col.w;
+  }
   // Rows share what's left between the table header and the approval block, so a long month still fits one page.
   const approvalBlock = 18 + 22 + 15 + 30 + 18 + 26;
   const rowH = Math.min(24, Math.max(11, Math.floor((y - FOOTER_TOP - approvalBlock) / Math.max(1, sheet.rows.length))));
-    // Times, hours and day status are the point of the sheet: bold and as large as the row allows.
-  const fs = rowH < 13 ? 9 : rowH < 17 ? 10.5 : 12;
+  const fs = rowH < 14 ? 8 : 9;
   for (const r of sheet.rows) {
     y -= rowH;
     const v = rowCells(r);
@@ -164,21 +169,17 @@ async function pdfMonth(c: PdfCtx, sheet: SheetData) {
     const xs = cols.map((col) => { const at = x; x += col.w; return at; });
     cols.forEach((col, i) => { if (!(v.off && (i === 2 || i === 3 || i === 4))) box(xs[i], y, col.w, rowH); });
     if (v.off) box(xs[2], y, cols[2].w + cols[3].w + cols[4].w, rowH);
-        const mid = y + rowH / 2 - 3;
-    const midBig = y + rowH / 2 - fs * 0.35;
+    const mid = y + rowH / 2 - 3;
+    const offSize = fs + 1;
     text(page, v.day, xs[0] + 3, mid, 7);
     text(page, v.date, xs[1] + 3, mid, 8);
     if (v.off) {
       // Holiday / Absent / Excused: bold, centred across the three time columns.
       const spanW = cols[2].w + cols[3].w + cols[4].w;
       let t = v.off.toUpperCase();
-      while (t.length > 3 && bold.widthOfTextAtSize(t, fs) > spanW - 8) t = t.slice(0, -2) + "…";
-      text(page, t, xs[2] + (spanW - bold.widthOfTextAtSize(t, fs)) / 2, midBig, fs, bold, ink);
-    } else {
-      text(page, v.start, xs[2] + 4, midBig, fs, bold, ink);
-      text(page, v.end, xs[3] + 4, midBig, fs, bold, ink);
-      text(page, v.hours, xs[4] + 4, midBig, fs, bold, ink);
-    }
+      while (t.length > 3 && bold.widthOfTextAtSize(t, offSize) > spanW - 8) t = t.slice(0, -2) + "…";
+      text(page, t, xs[2] + (spanW - bold.widthOfTextAtSize(t, offSize)) / 2, y + rowH / 2 - offSize * 0.35, offSize, bold, ink);
+    } else { text(page, v.start, xs[2] + 4, mid, fs, font, ink); text(page, v.end, xs[3] + 4, mid, fs, font, ink); text(page, v.hours, xs[4] + 4, mid, fs, font, ink); }
     for (const [i, id] of [[5, v.studentSig], [6, v.staffSig]] as const) {
       const img = await image(id, sheet.images);
       if (img) { const d = fit(img.width, img.height, cols[i].w - 8, rowH - 3); page.drawImage(img, { x: xs[i] + (cols[i].w - d.w) / 2, y: y + (rowH - d.h) / 2, width: d.w, height: d.h }); }
@@ -218,15 +219,16 @@ const thin = { style: BorderStyle.SINGLE, size: 6, color: "2B3445" };
 const borders = { top: thin, bottom: thin, left: thin, right: thin };
 const none = { style: BorderStyle.NONE, size: 0, color: "FFFFFF" };
 const noBorders = { top: none, bottom: none, left: none, right: none };
-const cell = (children: (TextRun | ImageRun)[] | string, opts: { width?: number; bold?: boolean; span?: number; ink?: boolean; size?: number; center?: boolean } = {}) =>
+const cell = (children: (TextRun | ImageRun)[] | string, opts: { width?: number; bold?: boolean; span?: number; ink?: boolean; size?: number; center?: boolean; shade?: boolean } = {}) =>
   new TableCell({
     borders,
+    shading: opts.shade ? { type: ShadingType.CLEAR, color: "auto", fill: "F6F8FB" } : undefined,
     columnSpan: opts.span,
     width: opts.width ? { size: opts.width, type: WidthType.DXA } : undefined,
     margins: { top: 20, bottom: 20, left: 80, right: 80 },
     verticalAlign: VerticalAlign.CENTER,
     children: [new Paragraph({
-            spacing: { before: 0, after: 0 },
+      spacing: { before: 0, after: 0 },
       alignment: opts.center ? AlignmentType.CENTER : undefined,
       children: typeof children === "string"
         ? [new TextRun({ text: children, bold: opts.bold, size: opts.size ?? 16, color: opts.ink ? "1C3FAA" : undefined })]
@@ -309,13 +311,13 @@ export async function buildDocx(report: Report): Promise<Buffer> {
     }));
     children.push(new Paragraph({ spacing: { before: 200, after: 100 }, children: [new TextRun({ text: `MONTH: ${monthTitle(sheet.month).toUpperCase()}`, bold: true })] }));
     const widths = [1200, 1200, 1150, 1150, 800, 2050, 2050];
-    const header = new TableRow({ tableHeader: true, children: ["", "DATE", "START TIME", "END TIME", "HOURS", "STUDENT SIGNATURE", "STAFF SIGNATURE"].map((t, i) => cell(t, { width: widths[i], bold: true, size: 14 })) });
+    const header = new TableRow({ tableHeader: true, children: ["", "DATE", "START TIME", "END TIME", "HOURS", "STUDENT SIGNATURE", "STAFF SIGNATURE"].map((t, i) => cell(t, { width: widths[i], bold: true, size: 17, center: true, shade: true })) });
     const rows = sheet.rows.map((r) => {
       const v = rowCells(r);
       const first = [cell(v.day, { width: widths[0], size: 14 }), cell(v.date, { width: widths[1] })];
       const mid = v.off
-                ? [cell(v.off.toUpperCase(), { span: 3, ink: true, bold: true, center: true, size: 22, width: widths[2] + widths[3] + widths[4] })]
-        : [cell(v.start, { width: widths[2], ink: true, bold: true, size: 22 }), cell(v.end, { width: widths[3], ink: true, bold: true, size: 22 }), cell(v.hours, { width: widths[4], ink: true, bold: true, size: 22 })];
+        ? [cell(v.off.toUpperCase(), { span: 3, ink: true, bold: true, center: true, size: 20, width: widths[2] + widths[3] + widths[4] })]
+        : [cell(v.start, { width: widths[2], ink: true, size: 18 }), cell(v.end, { width: widths[3], ink: true, size: 18 }), cell(v.hours, { width: widths[4], ink: true, size: 18 })];
       return new TableRow({ children: [...first, ...mid, cell(sigRun(v.studentSig, sheet.images, 90, 17), { width: widths[5] }), cell(sigRun(v.staffSig, sheet.images, 90, 17), { width: widths[6] })] });
     });
     const total = new TableRow({ children: [cell("TOTAL HOURS", { span: 4, bold: true, width: widths[0] + widths[1] + widths[2] + widths[3] }), cell(hoursText(sheet.totalMinutes) || "0", { bold: true, ink: true, width: widths[4] }), cell("", { span: 2, width: widths[5] + widths[6] })] });
