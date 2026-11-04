@@ -155,3 +155,10 @@ dialog .inner { padding: 20px; }
   .paper { box-shadow: none; padding: 0; max-width: none; }
   .days tr.today td { background: none; }
 }
+
+/* Signatures on file, above the staff sheet */
+.sigpanel { max-width: 980px; margin: 0 auto 16px; display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; }
+.sigslot h3 { margin: 0; font-size: 17px; }
+.sigbox { background: #fff; border: 1.5px solid var(--line); border-radius: 10px; height: 92px; display: flex; align-items: center; justify-content: center; padding: 10px; }
+.sigbox img { max-height: 70px; max-width: 100%; }
+.sigbox.empty { border-style: dashed; color: var(--muted); font-size: 14px; }

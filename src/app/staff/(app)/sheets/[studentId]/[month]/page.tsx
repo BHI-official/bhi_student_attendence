@@ -5,6 +5,7 @@ import { canSee } from "@/lib/access";
 import { loadSheet, sheetHeader, thisMonth } from "@/lib/data";
 import { MONTH_RE, monthTitle, shiftMonth } from "@/lib/sheet";
 import { PaperSheet } from "@/components/PaperSheet";
+import { signatureImages } from "@/lib/signatures";
 
 export const dynamic = "force-dynamic";
 
@@ -16,6 +17,8 @@ export default async function StaffSheet({ params }: { params: Promise<{ student
   if (!sheet || !canSee(staff, sheet.student)) notFound();
   const s = sheet.student;
   const prev = shiftMonth(month, -1), next = shiftMonth(month, 1);
+  // The signatures on file now, for the panel above the sheet (rows keep the ones they were signed with).
+  const onFile = await signatureImages([s.signatureId, staff.signatureId]);
   return (
     <main className="wrap" style={{ maxWidth: 1040 }}>
       <div className="row no-print" style={{ justifyContent: "space-between", marginBottom: 14 }}>
@@ -30,7 +33,8 @@ export default async function StaffSheet({ params }: { params: Promise<{ student
         </div>
       </div>
       <PaperSheet mode="staff" student={sheetHeader(s)} month={month} rows={sheet.rows} totalMinutes={sheet.totalMinutes}
-        approval={sheet.approval} approvalCurrent={sheet.approvalCurrent} hasSavedSignature={!!staff.signatureId} images={sheet.images} />
+        approval={sheet.approval} approvalCurrent={sheet.approvalCurrent} hasSavedSignature={!!staff.signatureId} images={{ ...sheet.images, ...onFile }}
+        studentHasSignature={!!s.signatureId} studentSignatureId={s.signatureId} staffSignatureId={staff.signatureId} staffName={staff.name} />
     </main>
   );
 }

@@ -37,22 +37,31 @@ const NO_SIG = "Put your signature on file first (My account), then sign with on
 const signable = (e: Entry | null, holiday: boolean) =>
   holiday || (!!e && (e.status !== "PRESENT" || (!!e.startTime && !!e.endTime)));
 
+/** A present day with both times, the only kind of row a student signs. */
+const needsStudentSig = (e: Entry | null) => !!e && e.status === "PRESENT" && !!e.startTime && !!e.endTime && !e.studentSignature;
+
 /**
  * Staff signs many rows at once (the "Staff signature" column), with one drawing or their saved
  * signature. Rows already signed by staff are left alone. Holiday rows get a HOLIDAY entry.
+ *
+ * Staff can also add the student's signature on file, in the same step, to present rows that
+ * don't have one (e.g. staff wrote the times because the student forgot to tap End). This is
+ * recorded on the signature, in the row's history and in the audit log.
  */
 export async function signRowsAction(_: ActionState, fd: FormData): Promise<ActionState> {
   const staff = await requireStaff();
   const keys = z.array(z.string().regex(/^[0-9a-f-]{36}:\d{4}-\d{2}-\d{2}$/)).max(1000).safeParse(JSON.parse(String(fd.get("rows") ?? "[]")));
   if (!keys.success || !keys.data.length) return { error: "Choose the rows to sign." };
   if (!staff.signatureId) return { error: NO_SIG };
+  const wantsStudentSig = fd.get("withStudentSignature") === "1";
   const { entries, students } = await cols();
   const dates = keys.data.map((k) => k.slice(37));
   const holidays = await holidaysBetween(dates.reduce((a, b) => (a < b ? a : b)), dates.reduce((a, b) => (a > b ? a : b)));
   const now = new Date();
   const sig = { id: staff.signatureId, at: now, staffId: staff._id, staffName: staff.name };
-  let signed = 0;
+  let signed = 0, studentSigned = 0;
   const skipped: string[] = [];
+  const noStudentSig: string[] = [];
   for (const key of new Set(keys.data)) {
     const [studentId, date] = [key.slice(0, 36), key.slice(37)];
     if (date > today()) { skipped.push(`${usDate(date)} is in the future`); continue; }
@@ -69,13 +78,137 @@ export async function signRowsAction(_: ActionState, fd: FormData): Promise<Acti
         { upsert: true },
       );
     }
+    if (wantsStudentSig && needsStudentSig(e)) {
+      if (!student.signatureId) noStudentSig.push(student.name);
+      else {
+        // Both signatures in one write, and only if neither was added in the meantime.
+        const studentSignature = { id: student.signatureId, at: now, addedBy: { staffId: staff._id, staffName: staff.name } };
+        const res = await entries.updateOne(
+          { _id: key, staffSignature: null, studentSignature: null },
+          {
+            $set: { staffSignature: sig, studentSignature, updatedAt: now },
+            $push: { history: { at: now, byId: staff._id, byName: staff.name, what: "student signature on file added by staff", reason: "signed with staff signature" } },
+          },
+        );
+        if (res.modifiedCount) {
+          signed++; studentSigned++;
+          await audit(staff._id, "staff.add_student_signature", key, { signatureId: student.signatureId });
+          continue;
+        }
+      }
+    }
     const res = await entries.updateOne({ _id: key, staffSignature: null }, { $set: { staffSignature: sig, updatedAt: now } });
     if (res.modifiedCount) signed++;
   }
-  await audit(staff._id, "staff.sign_rows", "entries", { signed, skipped: skipped.length });
+  await audit(staff._id, "staff.sign_rows", "entries", { signed, studentSigned, skipped: skipped.length });
   refresh();
-  const extra = skipped.length ? ` Not signed: ${skipped.slice(0, 5).join("; ")}${skipped.length > 5 ? ` and ${skipped.length - 5} more` : ""}.` : "";
+  const list = (xs: string[]) => `${xs.slice(0, 5).join("; ")}${xs.length > 5 ? ` and ${xs.length - 5} more` : ""}`;
+  const names = [...new Set(noStudentSig)];
+  const extra =
+    (studentSigned ? ` Added the student's signature to ${studentSigned} of them.` : "") +
+    (names.length ? ` No signature on file for ${list(names)}, so their row${noStudentSig.length === 1 ? " has" : "s have"} no student signature yet.` : "") +
+    (skipped.length ? ` Not signed: ${list(skipped)}.` : "");
   return signed ? { ok: true, message: `Signed ${signed} row${signed === 1 ? "" : "s"}.${extra}` } : { error: `Nothing was signed.${extra}` };
+}
+
+const ROW_KEY = /^[0-9a-f-]{36}:\d{4}-\d{2}-\d{2}$/;
+type StaffDoc = Awaited<ReturnType<typeof requireStaff>>;
+
+/**
+ * Adds the student's signature on file to one row (a present day with both times, no student
+ * signature yet), recorded as added by this staff member. Returns a message for this row.
+ */
+async function addStudentSignature(staff: StaffDoc, rowKey: string): Promise<{ ok: boolean; message: string }> {
+  if (!ROW_KEY.test(rowKey)) return { ok: false, message: "Invalid row." };
+  const [studentId, date] = [rowKey.slice(0, 36), rowKey.slice(37)];
+  if (date > today()) return { ok: false, message: `${usDate(date)} is in the future.` };
+  const { entries, students } = await cols();
+  const student = await students.findOne({ _id: studentId });
+  if (!student || !canSee(staff, student)) return { ok: false, message: "That student isn't in your courses." };
+  if (!student.signatureId) return { ok: false, message: `${student.name} has no signature on file. Add it at the top of the sheet first.` };
+  const e = await entries.findOne({ _id: rowKey });
+  if (e?.studentSignature) return { ok: false, message: `${usDate(date)} already has the student's signature.` };
+  if (!needsStudentSig(e)) return { ok: false, message: `${usDate(date)}: enter the start and end time first.` };
+  const now = new Date();
+  const res = await entries.updateOne(
+    { _id: rowKey, studentSignature: null },
+    {
+      $set: { studentSignature: { id: student.signatureId, at: now, addedBy: { staffId: staff._id, staffName: staff.name } }, updatedAt: now },
+      $push: { history: { at: now, byId: staff._id, byName: staff.name, what: "student signature on file added by staff", reason: "filled from the sheet" } },
+    },
+  );
+  if (!res.modifiedCount) return { ok: false, message: `${usDate(date)} already has the student's signature.` };
+  await audit(staff._id, "staff.add_student_signature", rowKey, { signatureId: student.signatureId });
+  return { ok: true, message: `Student signature added for ${student.name}, ${usDate(date)}.` };
+}
+
+/** One tap in the "Student signature" cell: fill it with the student's signature on file. */
+export async function fillStudentSignatureAction(rowKey: string): Promise<ActionState> {
+  const staff = await requireStaff();
+  const r = await addStudentSignature(staff, rowKey);
+  if (r.ok) refresh();
+  return r.ok ? { ok: true, message: r.message } : { error: r.message };
+}
+
+/** "Fill student signature on all rows": the same as tapping each cell. */
+export async function fillStudentSignaturesAction(rowKeys: string[]): Promise<ActionState> {
+  const staff = await requireStaff();
+  const keys = z.array(z.string().regex(ROW_KEY)).min(1).max(100).safeParse(rowKeys);
+  if (!keys.success) return { error: "Choose the rows to fill." };
+  let added = 0;
+  const problems: string[] = [];
+  for (const k of new Set(keys.data)) {
+    const r = await addStudentSignature(staff, k);
+    if (r.ok) added++; else problems.push(r.message);
+  }
+  refresh();
+  const extra = problems.length ? ` Not filled: ${problems.slice(0, 3).join(" ")}${problems.length > 3 ? ` and ${problems.length - 3} more.` : ""}` : "";
+  return added ? { ok: true, message: `Student signature added to ${added} row${added === 1 ? "" : "s"}.${extra}` } : { error: `Nothing was filled.${extra}` };
+}
+
+/**
+ * Swap the signature already on a row for the current one on file: the student's newest
+ * signature, or this staff member's own (which also makes them the row's signer). Times are not
+ * touched. The old and new signature are kept in the row's history and the audit log.
+ */
+export async function replaceRowSignatureAction(rowKey: string, which: "student" | "staff"): Promise<ActionState> {
+  const staff = await requireStaff();
+  if (!ROW_KEY.test(rowKey) || (which !== "student" && which !== "staff")) return { error: "Invalid row." };
+  const [studentId, date] = [rowKey.slice(0, 36), rowKey.slice(37)];
+  const { entries, students } = await cols();
+  const student = await students.findOne({ _id: studentId });
+  if (!student || !canSee(staff, student)) return { error: "That student isn't in your courses." };
+  const e = await entries.findOne({ _id: rowKey });
+  const now = new Date();
+  if (which === "student") {
+    if (!e?.studentSignature) return { error: "This row has no student signature to change. Use Fill with signature." };
+    if (!student.signatureId) return { error: `${student.name} has no signature on file.` };
+    if (e.studentSignature.id === student.signatureId) return { ok: true, message: "This row already uses the current signature." };
+    const res = await entries.updateOne(
+      { _id: rowKey, "studentSignature.id": e.studentSignature.id },
+      {
+        $set: { studentSignature: { id: student.signatureId, at: now, addedBy: { staffId: staff._id, staffName: staff.name } }, updatedAt: now },
+        $push: { history: { at: now, byId: staff._id, byName: staff.name, what: "student signature changed to the one on file", reason: "updated from the sheet" } },
+      },
+    );
+    if (!res.modifiedCount) return { error: "The row changed in the meantime. Try again." };
+    await audit(staff._id, "staff.replace_student_signature", rowKey, { from: e.studentSignature.id, to: student.signatureId });
+  } else {
+    if (!staff.signatureId) return { error: NO_SIG };
+    if (!e?.staffSignature) return { error: "This row isn't signed by staff yet. Use Fill with my signature." };
+    if (e.staffSignature.id === staff.signatureId) return { ok: true, message: "This row already has your current signature." };
+    const res = await entries.updateOne(
+      { _id: rowKey, "staffSignature.id": e.staffSignature.id },
+      {
+        $set: { staffSignature: { id: staff.signatureId, at: now, staffId: staff._id, staffName: staff.name }, updatedAt: now },
+        $push: { history: { at: now, byId: staff._id, byName: staff.name, what: `staff signature changed (was ${e.staffSignature.staffName})`, reason: "re-signed from the sheet" } },
+      },
+    );
+    if (!res.modifiedCount) return { error: "The row changed in the meantime. Try again." };
+    await audit(staff._id, "staff.replace_staff_signature", rowKey, { from: e.staffSignature.id, fromStaff: e.staffSignature.staffId, to: staff.signatureId });
+  }
+  refresh();
+  return { ok: true, message: `${usDate(date)}: signature updated.` };
 }
 
 /**

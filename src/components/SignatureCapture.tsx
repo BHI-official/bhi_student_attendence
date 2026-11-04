@@ -72,9 +72,14 @@ export async function cleanSignaturePhoto(file: File): Promise<string> {
 }
 
 /** Put a signature on file: upload a photo of it, or draw it. Shows a preview before saving. */
-export function SignatureOnFile({ action, title, extra }: {
+export function SignatureOnFile({ action, title, extra, uploadLabel = "Upload a photo of my signature", drawLabel = "Draw it instead", compact = false, onSaved }: {
   action: (prev: ActionState, fd: FormData) => Promise<ActionState>; title: string; extra?: Record<string, string>;
+  uploadLabel?: string; drawLabel?: string;
+  /** Smaller buttons, for use inside another panel. */
+  compact?: boolean;
+  onSaved?: () => void;
 }) {
+  const size = compact ? "" : " big";
   const router = useRouter();
   const [png, setPng] = useState<string | null>(null);
   const [source, setSource] = useState<"UPLOAD" | "DRAWN">("UPLOAD");
@@ -96,24 +101,24 @@ export function SignatureOnFile({ action, title, extra }: {
     for (const [k, v] of Object.entries(extra ?? {})) fd.set(k, v);
     const r = await action({}, fd);
     setMsg(r);
-    if (r.ok) { setPng(null); router.refresh(); }
+    if (r.ok) { setPng(null); router.refresh(); onSaved?.(); }
   });
 
   return (
     <div>
       {!png ? (
         <div className="row">
-          <label className="btn big" style={{ cursor: "pointer" }}>
-            {busy ? "Reading photo…" : "Upload a photo of my signature"}
+          <label className={`btn${size}`} style={{ cursor: "pointer" }}>
+            {busy ? "Reading photo…" : uploadLabel}
             <input type="file" accept="image/*" capture="environment" hidden onChange={(e) => { void pick(e.target.files?.[0]); e.target.value = ""; }} />
           </label>
-          <button type="button" className="btn ghost big" onClick={() => setDraw(true)}>Draw it instead</button>
+          <button type="button" className={`btn ghost${size}`} onClick={() => setDraw(true)}>{drawLabel}</button>
         </div>
       ) : (
         <div>
           <p className="small muted">This is how it will appear on the sheet:</p>
           <div style={{ background: "#fff", border: "1.5px solid var(--line)", borderRadius: 10, padding: 16, display: "inline-block" }}>
-            <img src={png} alt="Signature preview" style={{ maxHeight: 120, maxWidth: "100%" }} />
+            <img src={png} alt="Signature preview" style={{ maxHeight: compact ? 80 : 120, maxWidth: "100%" }} />
           </div>
           <div className="row" style={{ marginTop: 12 }}>
             <button className="btn" disabled={pending} onClick={save}>{pending ? "Saving…" : "Use this signature"}</button>

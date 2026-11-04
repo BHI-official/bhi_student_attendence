@@ -52,7 +52,12 @@ export type SignatureDoc = {
   createdAt: Date;
   createdBy: string; // who put it on file (the person, or the staff member who uploaded it for them)
 };
-export type Signature = { id: string; at: Date };
+export type Signature = {
+  id: string;
+  at: Date;
+  /** Set when an admin added the student's signature on file to the row (not the student). */
+  addedBy?: { staffId: string; staffName: string } | null;
+};
 export type StaffSignature = Signature & { staffId: string; staffName: string };
 
 export type Change = { at: Date; byId: string; byName: string; what: string; reason: string };

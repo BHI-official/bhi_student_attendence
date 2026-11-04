@@ -6,7 +6,9 @@ import type { ActionState } from "@/lib/action";
 import type { Entry, MonthApproval, Student } from "@/lib/types";
 import { LATE_ENTRY_FLAG_MINUTES, clockIn, hoursText, monthTitle, time12, toMinutes, usDate, type SheetRow } from "@/lib/sheet";
 import { studentFillAction, studentStartAction } from "@/actions/student";
-import { approveMonthAction, editRowAction, signRowsAction } from "@/actions/staff";
+import { approveMonthAction, editRowAction, fillStudentSignatureAction, fillStudentSignaturesAction, replaceRowSignatureAction, saveMySignatureAction, signRowsAction } from "@/actions/staff";
+import { setStudentSignatureAction } from "@/actions/admin";
+import { SignatureOnFile } from "./SignatureCapture";
 import { Msg } from "./forms";
 import { TimeEntry, type SchoolClock } from "./TimeEntry";
 import { Letterhead } from "./Brand";
@@ -20,6 +22,12 @@ type Props = {
   approval: MonthApproval | null;
   approvalCurrent: boolean;
   hasSavedSignature?: boolean;
+  /** Staff mode: the student has a signature on file, so staff can fill it into rows. */
+  studentHasSignature?: boolean;
+  /** Staff mode: the signatures on file now (their images are in `images`), and who is signing. */
+  studentSignatureId?: string | null;
+  staffSignatureId?: string | null;
+  staffName?: string;
   /** Signature images on this page, by id. */
   images: Record<string, string>;
   /** Student mode: the school's clock and the limits for typed times. */
@@ -46,6 +54,7 @@ export function PaperSheet(p: Props) {
   const [evidence, setEvidence] = useState(false);
   const [editing, setEditing] = useState<SheetRow | null>(null);
   const [typing, setTyping] = useState<"start" | "end" | null>(null);
+  const [withStudent, setWithStudent] = useState(true);
   const staff = p.mode === "staff";
   const key = (date: string) => `${p.student._id}:${date}`;
 
@@ -73,10 +82,22 @@ export function PaperSheet(p: Props) {
 
   // ----- Staff: sign selected rows -----
   const signable = (r: SheetRow) => !r.isFuture && !r.entry?.staffSignature && (!!r.holiday || (!!r.entry && (r.entry.status !== "PRESENT" || (!!r.entry.startTime && !!r.entry.endTime))));
+  /** A present day with both times and no student signature: an admin can add it. */
+  const missingStudent = (r: SheetRow) => !r.holiday && !!r.entry && r.entry.status === "PRESENT" && !!r.entry.startTime && !!r.entry.endTime && !r.entry.studentSignature;
+  const pickedMissing = p.rows.filter((r) => picked.has(key(r.date)) && missingStudent(r)).length;
+  const offerStudent = staff && pickedMissing > 0;
   const signPicked = () => {
     const fd = new FormData();
     fd.set("rows", JSON.stringify([...picked]));
+    if (offerStudent && withStudent && p.studentHasSignature) fd.set("withStudentSignature", "1");
     run(async () => { const r = await signRowsAction({}, fd); if (r.ok) setPicked(new Set()); return r; });
+  };
+  // ----- Staff: one tap in a signature cell -----
+  const fillStudent = (r: SheetRow) => run(() => fillStudentSignatureAction(key(r.date)));
+  const fillStaff = (r: SheetRow) => {
+    const fd = new FormData();
+    fd.set("rows", JSON.stringify([key(r.date)]));
+    run(async () => { const res = await signRowsAction({}, fd); if (res.ok) setPicked((x) => { const n = new Set(x); n.delete(key(r.date)); return n; }); return res; });
   };
   const toggle = (k: string) => setPicked((s) => { const n = new Set(s); if (n.has(k)) n.delete(k); else n.add(k); return n; });
 
@@ -102,6 +123,20 @@ export function PaperSheet(p: Props) {
         <label className="small"><input type="checkbox" className="chk" checked={evidence} onChange={(e) => setEvidence(e.target.checked)} /> Show when each time was saved</label>
         <Msg state={msg} />
       </div>
+
+      {staff && (
+        <SignaturePanel
+          studentId={s._id} studentName={s.name} staffName={p.staffName ?? "You"}
+          studentSig={p.studentSignatureId ? p.images[p.studentSignatureId] ?? null : null}
+          staffSig={p.staffSignatureId ? p.images[p.staffSignatureId] ?? null : null}
+          pending={pending}
+          studentFillable={p.rows.filter((r) => !r.isFuture && missingStudent(r)).map((r) => key(r.date))}
+          staffFillable={p.rows.filter(signable).map((r) => key(r.date))}
+          studentOutdated={p.studentSignatureId ? p.rows.filter((r) => r.entry?.studentSignature && r.entry.studentSignature.id !== p.studentSignatureId).map((r) => key(r.date)) : []}
+          staffOutdated={p.staffSignatureId ? p.rows.filter((r) => r.entry?.staffSignature && r.entry.staffSignature.id !== p.staffSignatureId).map((r) => key(r.date)) : []}
+          run={run}
+        />
+      )}
 
       <div className="desk">
         <article className="paper" aria-label={`Attendance sheet for ${s.name}, ${monthTitle(p.month)}`}>
@@ -149,8 +184,25 @@ export function PaperSheet(p: Props) {
                         <td>{e?.minutes != null && <span className="hand">{hoursText(e.minutes)}</span>}</td>
                       </>
                     )}
-                    <td>{e?.studentSignature && p.images[e.studentSignature.id] && <img className="sig" src={p.images[e.studentSignature.id]} alt={`Student signature, ${usDate(r.date)}`} />}</td>
-                    <td>{e?.staffSignature && p.images[e.staffSignature.id] && <img className="sig" src={p.images[e.staffSignature.id]} alt={`Signed by ${e.staffSignature.staffName}`} title={e.staffSignature.staffName} />}</td>
+                    <td>
+                      {e?.studentSignature && p.images[e.studentSignature.id] && <img className="sig" src={p.images[e.studentSignature.id]} alt={`Student signature, ${usDate(r.date)}`} />}
+                      {staff && e?.studentSignature?.addedBy && <span className="small muted no-print" style={{ display: "block" }}>added by {e.studentSignature.addedBy.staffName}</span>}
+                      {staff && !r.isFuture && missingStudent(r) && (p.studentHasSignature
+                        ? <button className="fill no-print" disabled={pending} onClick={() => fillStudent(r)} aria-label={`Fill student signature, ${usDate(r.date)}`}>Fill with signature</button>
+                        : <a className="small no-print" href="#signatures">No signature on file</a>)}
+                      {staff && e?.studentSignature && p.studentSignatureId && e.studentSignature.id !== p.studentSignatureId && (
+                        <button className="edit no-print" disabled={pending} onClick={() => run(() => replaceRowSignatureAction(k, "student"))}>Use new signature</button>
+                      )}
+                    </td>
+                    <td>
+                      {e?.staffSignature && p.images[e.staffSignature.id] && <img className="sig" src={p.images[e.staffSignature.id]} alt={`Signed by ${e.staffSignature.staffName}`} title={e.staffSignature.staffName} />}
+                      {staff && signable(r) && p.hasSavedSignature && (
+                        <button className="fill no-print" disabled={pending} onClick={() => fillStaff(r)} aria-label={`Fill staff signature, ${usDate(r.date)}`}>Fill with my signature</button>
+                      )}
+                      {staff && e?.staffSignature && p.staffSignatureId && e.staffSignature.id !== p.staffSignatureId && (
+                        <button className="edit no-print" disabled={pending} onClick={() => run(() => replaceRowSignatureAction(k, "staff"))}>Re-sign with mine</button>
+                      )}
+                    </td>
                   </tr>
                 );
               })}
@@ -179,6 +231,14 @@ export function PaperSheet(p: Props) {
           {p.hasSavedSignature
             ? <button className="btn" disabled={pending} onClick={signPicked}>Sign {picked.size} with my signature</button>
             : <a className="btn" href="/staff/account">Put your signature on file first</a>}
+          {offerStudent && p.hasSavedSignature && (p.studentHasSignature ? (
+            <label className="small" title="Uses the student's signature on file. Recorded as added by you.">
+              <input type="checkbox" className="chk" checked={withStudent} onChange={(e) => setWithStudent(e.target.checked)} />{" "}
+              Also add student signature ({pickedMissing} row{pickedMissing === 1 ? "" : "s"})
+            </label>
+          ) : (
+            <span className="small muted">{pickedMissing} row{pickedMissing === 1 ? " has" : "s have"} no student signature, and none is on file. <a href="#signatures">Add one</a></span>
+          ))}
           <button className="btn ghost" onClick={() => setPicked(new Set())}>Clear selection</button>
         </div>
       )}
@@ -267,5 +327,85 @@ function EditRow({ studentId, row, onClose }: { studentId: string; row: SheetRow
         </div>
       </form>
     </div>
+  );
+}
+
+/**
+ * Staff mode, above the sheet: both signatures on file, with one place to add or replace each
+ * (photo or drawing) and to fill or update every row of this month in one tap.
+ */
+function SignaturePanel(p: {
+  studentId: string; studentName: string; staffName: string;
+  studentSig: string | null; staffSig: string | null; pending: boolean;
+  studentFillable: string[]; staffFillable: string[]; studentOutdated: string[]; staffOutdated: string[];
+  run: (fn: () => Promise<ActionState>) => void;
+}) {
+  const [open, setOpen] = useState<"student" | "staff" | null>(null);
+  const n = (x: number, one: string) => `${x} ${one}${x === 1 ? "" : "s"}`;
+
+  const fillStudentAll = () => p.run(() => fillStudentSignaturesAction(p.studentFillable));
+  const fillStaffAll = () => {
+    const fd = new FormData();
+    fd.set("rows", JSON.stringify(p.staffFillable));
+    p.run(() => signRowsAction({}, fd));
+  };
+  const updateAll = (which: "student" | "staff", keys: string[]) => {
+    if (which === "staff" && !window.confirm(`Re-sign ${n(keys.length, "row")} with your signature? You become the staff member who signed them.`)) return;
+    p.run(async () => {
+      let done = 0; let last: ActionState = {};
+      for (const k of keys) { last = await replaceRowSignatureAction(k, which); if (last.ok) done++; }
+      return done ? { ok: true, message: `Updated the signature on ${n(done, "row")}.` } : last;
+    });
+  };
+
+  const slot = (which: "student" | "staff") => {
+    const isStudent = which === "student";
+    const img = isStudent ? p.studentSig : p.staffSig;
+    const fillable = isStudent ? p.studentFillable : p.staffFillable;
+    const outdated = isStudent ? p.studentOutdated : p.staffOutdated;
+    return (
+      <div className="sigslot">
+        <h3>{isStudent ? "Student signature" : "My signature"}</h3>
+        <p className="small muted" style={{ margin: "0 0 8px" }}>{isStudent ? p.studentName : p.staffName}</p>
+        <div className={`sigbox${img ? "" : " empty"}`}>
+          {img ? <img src={img} alt={isStudent ? `Signature of ${p.studentName}` : "My signature"} /> : <span>No signature on file</span>}
+        </div>
+        <div className="row" style={{ marginTop: 10 }}>
+          {img && fillable.length > 0 && (
+            <button className="btn" disabled={p.pending} onClick={isStudent ? fillStudentAll : fillStaffAll}>
+              {isStudent ? `Fill ${n(fillable.length, "row")}` : `Sign ${n(fillable.length, "row")}`}
+            </button>
+          )}
+          {img && outdated.length > 0 && (
+            <button className="btn ghost" disabled={p.pending} onClick={() => updateAll(which, outdated)}>
+              {isStudent ? `Update ${n(outdated.length, "older row")}` : `Re-sign ${n(outdated.length, "row")} with mine`}
+            </button>
+          )}
+          <button className={`btn ${img ? "ghost" : ""}`} onClick={() => setOpen(open === which ? null : which)} aria-expanded={open === which}>
+            {open === which ? "Close" : img ? "Replace" : "Add signature"}
+          </button>
+        </div>
+        {img && fillable.length === 0 && outdated.length === 0 && <p className="small muted" style={{ marginBottom: 0 }}>Every row that can be signed this month is done.</p>}
+        {open === which && (
+          <div style={{ marginTop: 12 }}>
+            <SignatureOnFile
+              compact onSaved={() => setOpen(null)}
+              action={isStudent ? setStudentSignatureAction.bind(null, p.studentId) : saveMySignatureAction}
+              title={isStudent ? `Signature of ${p.studentName}` : "Draw your signature"}
+              uploadLabel={isStudent ? "Upload photo of their signature" : "Upload photo of my signature"}
+              drawLabel="Draw it"
+            />
+            <p className="small muted">Rows already signed keep their old signature until you update them.</p>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <section id="signatures" className="panel no-print sigpanel" aria-label="Signatures on file">
+      {slot("student")}
+      {slot("staff")}
+    </section>
   );
 }

@@ -33,7 +33,7 @@ export default async function StaffToday({ searchParams }: { searchParams: Promi
       <TodayBoard key={`${date}:${course ?? ""}`} date={date} month={date.slice(0, 7)} holiday={day.holiday} hasSaved={!!staff.signatureId} isToday={date === now}
         rows={day.rows.map(({ student: s, entry: e }) => ({
           id: s._id, name: s.name, course: s.courseName, status: e?.status ?? null, start: e?.startTime ?? null, end: e?.endTime ?? null,
-          minutes: e?.minutes ?? null, startLateBy: e?.startLateBy ?? null, endLateBy: e?.endLateBy ?? null, studentSigned: !!e?.studentSignature, staffSigned: !!e?.staffSignature,
+          minutes: e?.minutes ?? null, startLateBy: e?.startLateBy ?? null, endLateBy: e?.endLateBy ?? null, studentSigned: !!e?.studentSignature, staffSigned: !!e?.staffSignature, studentHasSignature: !!s.signatureId,
         }))} />
     </main>
   );
