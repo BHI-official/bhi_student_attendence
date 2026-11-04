@@ -33,13 +33,8 @@ export default async function StaffSheet({ params }: { params: Promise<{ student
         </div>
       </div>
       <PaperSheet mode="staff" student={sheetHeader(s)} month={month} rows={sheet.rows} totalMinutes={sheet.totalMinutes}
-<<<<<<< HEAD
         approval={sheet.approval} approvalCurrent={sheet.approvalCurrent} hasSavedSignature={!!staff.signatureId} images={{ ...sheet.images, ...onFile }}
         studentHasSignature={!!s.signatureId} studentSignatureId={s.signatureId} staffSignatureId={staff.signatureId} staffName={staff.name} />
-=======
-        approval={sheet.approval} approvalCurrent={sheet.approvalCurrent} hasSavedSignature={!!staff.signatureId} images={sheet.images}
-        isAdmin={staff.role === "ADMIN"} studentHasSignature={!!s.signatureId} />
->>>>>>> 3e7ce88042cb3e940d814dd1e2ca3566f364165b
     </main>
   );
 }

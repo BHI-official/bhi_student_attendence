@@ -44,11 +44,7 @@ const needsStudentSig = (e: Entry | null) => !!e && e.status === "PRESENT" && !!
  * Staff signs many rows at once (the "Staff signature" column), with one drawing or their saved
  * signature. Rows already signed by staff are left alone. Holiday rows get a HOLIDAY entry.
  *
-<<<<<<< HEAD
  * Staff can also add the student's signature on file, in the same step, to present rows that
-=======
- * Admins can also add the student's signature on file, in the same step, to present rows that
->>>>>>> 3e7ce88042cb3e940d814dd1e2ca3566f364165b
  * don't have one (e.g. staff wrote the times because the student forgot to tap End). This is
  * recorded on the signature, in the row's history and in the audit log.
  */
@@ -58,10 +54,6 @@ export async function signRowsAction(_: ActionState, fd: FormData): Promise<Acti
   if (!keys.success || !keys.data.length) return { error: "Choose the rows to sign." };
   if (!staff.signatureId) return { error: NO_SIG };
   const wantsStudentSig = fd.get("withStudentSignature") === "1";
-<<<<<<< HEAD
-=======
-  if (wantsStudentSig && staff.role !== "ADMIN") return { error: "Only an admin can add a student's signature." };
->>>>>>> 3e7ce88042cb3e940d814dd1e2ca3566f364165b
   const { entries, students } = await cols();
   const dates = keys.data.map((k) => k.slice(37));
   const holidays = await holidaysBetween(dates.reduce((a, b) => (a < b ? a : b)), dates.reduce((a, b) => (a > b ? a : b)));
@@ -95,11 +87,7 @@ export async function signRowsAction(_: ActionState, fd: FormData): Promise<Acti
           { _id: key, staffSignature: null, studentSignature: null },
           {
             $set: { staffSignature: sig, studentSignature, updatedAt: now },
-<<<<<<< HEAD
             $push: { history: { at: now, byId: staff._id, byName: staff.name, what: "student signature on file added by staff", reason: "signed with staff signature" } },
-=======
-            $push: { history: { at: now, byId: staff._id, byName: staff.name, what: "student signature on file added by admin", reason: "signed with staff signature" } },
->>>>>>> 3e7ce88042cb3e940d814dd1e2ca3566f364165b
           },
         );
         if (res.modifiedCount) {

@@ -22,18 +22,12 @@ type Props = {
   approval: MonthApproval | null;
   approvalCurrent: boolean;
   hasSavedSignature?: boolean;
-<<<<<<< HEAD
   /** Staff mode: the student has a signature on file, so staff can fill it into rows. */
   studentHasSignature?: boolean;
   /** Staff mode: the signatures on file now (their images are in `images`), and who is signing. */
   studentSignatureId?: string | null;
   staffSignatureId?: string | null;
   staffName?: string;
-=======
-  /** Staff mode: admins can add the student's signature on file while signing rows. */
-  isAdmin?: boolean;
-  studentHasSignature?: boolean;
->>>>>>> 3e7ce88042cb3e940d814dd1e2ca3566f364165b
   /** Signature images on this page, by id. */
   images: Record<string, string>;
   /** Student mode: the school's clock and the limits for typed times. */
@@ -91,11 +85,7 @@ export function PaperSheet(p: Props) {
   /** A present day with both times and no student signature: an admin can add it. */
   const missingStudent = (r: SheetRow) => !r.holiday && !!r.entry && r.entry.status === "PRESENT" && !!r.entry.startTime && !!r.entry.endTime && !r.entry.studentSignature;
   const pickedMissing = p.rows.filter((r) => picked.has(key(r.date)) && missingStudent(r)).length;
-<<<<<<< HEAD
   const offerStudent = staff && pickedMissing > 0;
-=======
-  const offerStudent = staff && !!p.isAdmin && pickedMissing > 0;
->>>>>>> 3e7ce88042cb3e940d814dd1e2ca3566f364165b
   const signPicked = () => {
     const fd = new FormData();
     fd.set("rows", JSON.stringify([...picked]));
@@ -197,7 +187,6 @@ export function PaperSheet(p: Props) {
                     <td>
                       {e?.studentSignature && p.images[e.studentSignature.id] && <img className="sig" src={p.images[e.studentSignature.id]} alt={`Student signature, ${usDate(r.date)}`} />}
                       {staff && e?.studentSignature?.addedBy && <span className="small muted no-print" style={{ display: "block" }}>added by {e.studentSignature.addedBy.staffName}</span>}
-<<<<<<< HEAD
                       {staff && !r.isFuture && missingStudent(r) && (p.studentHasSignature
                         ? <button className="fill no-print" disabled={pending} onClick={() => fillStudent(r)} aria-label={`Fill student signature, ${usDate(r.date)}`}>Fill with signature</button>
                         : <a className="small no-print" href="#signatures">No signature on file</a>)}
@@ -214,10 +203,6 @@ export function PaperSheet(p: Props) {
                         <button className="edit no-print" disabled={pending} onClick={() => run(() => replaceRowSignatureAction(k, "staff"))}>Re-sign with mine</button>
                       )}
                     </td>
-=======
-                    </td>
-                    <td>{e?.staffSignature && p.images[e.staffSignature.id] && <img className="sig" src={p.images[e.staffSignature.id]} alt={`Signed by ${e.staffSignature.staffName}`} title={e.staffSignature.staffName} />}</td>
->>>>>>> 3e7ce88042cb3e940d814dd1e2ca3566f364165b
                   </tr>
                 );
               })}
@@ -252,11 +237,7 @@ export function PaperSheet(p: Props) {
               Also add student signature ({pickedMissing} row{pickedMissing === 1 ? "" : "s"})
             </label>
           ) : (
-<<<<<<< HEAD
             <span className="small muted">{pickedMissing} row{pickedMissing === 1 ? " has" : "s have"} no student signature, and none is on file. <a href="#signatures">Add one</a></span>
-=======
-            <span className="small muted">{pickedMissing} row{pickedMissing === 1 ? " has" : "s have"} no student signature, and none is on file. <a href={`/staff/students/${s._id}`}>Add one</a></span>
->>>>>>> 3e7ce88042cb3e940d814dd1e2ca3566f364165b
           ))}
           <button className="btn ghost" onClick={() => setPicked(new Set())}>Clear selection</button>
         </div>
