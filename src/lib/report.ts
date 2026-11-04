@@ -196,7 +196,7 @@ async function pdfMonth(c: PdfCtx, sheet: SheetData) {
   text(page, "Approved by:", L, y, 9, bold);
   const a = sheet.approval;
   y -= 15;
-  text(page, `STAFF NAME/POSITION: ${a ? `${a.staffName}${a.position ? `, ${a.position}` : ""}` : "______________________________"}`, L, y, 9);
+  text(page, `STAFF NAME/POSITION: ${a ? `${a.staffName}${a.position ? `/${a.position}` : ""}`.toUpperCase() : "______________________________"}`, L, y, 9);
   y -= 30;
   text(page, "STAFF SIGNATURE:", L, y + 4, 9);
   const asig = a ? await image(a.signatureId, sheet.images) : null;
@@ -329,7 +329,7 @@ export async function buildDocx(report: Report): Promise<Buffer> {
     children.push(new Table({ width: { size: 9600, type: WidthType.DXA }, columnWidths: widths, rows: [header, ...rows, total] }));
     const a = sheet.approval;
     children.push(new Paragraph({ spacing: { before: 240 }, children: [new TextRun({ text: "Approved by:", bold: true })] }));
-    children.push(new Paragraph({ children: [new TextRun({ text: `STAFF NAME/POSITION: ${a ? `${a.staffName}${a.position ? `, ${a.position}` : ""}` : "______________________"}` })] }));
+    children.push(new Paragraph({ children: [new TextRun({ text: `STAFF NAME/POSITION: ${a ? `${a.staffName}${a.position ? `/${a.position}` : ""}`.toUpperCase() : "______________________"}` })] }));
     children.push(new Paragraph({ children: [new TextRun({ text: "STAFF SIGNATURE: " }), ...(a ? sigRun(a.signatureId, sheet.images, 160, 40) : [new TextRun("______________________")])] }));
     children.push(new Paragraph({ children: [new TextRun({ text: `COMMENTS: ${a?.comments ?? ""}` })] }));
     if (a && !sheet.approvalCurrent) children.push(new Paragraph({ children: [new TextRun({ text: "Note: rows changed after this month was approved.", italics: true })] }));

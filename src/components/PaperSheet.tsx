@@ -216,7 +216,7 @@ export function PaperSheet(p: Props) {
           <table className="approve" style={{ marginTop: 16 }}>
             <tbody>
               <tr>
-                <td style={{ width: "34%" }}><b>Approved by</b><br />STAFF NAME/POSITION:<br /><span className="hand">{p.approval ? `${p.approval.staffName}${p.approval.position ? `, ${p.approval.position}` : ""}` : ""}</span></td>
+                <td style={{ width: "34%" }}><b>Approved by</b><br />STAFF NAME/POSITION:<br /><span className="hand">{p.approval ? `${p.approval.staffName}${p.approval.position ? `/${p.approval.position}` : ""}`.toUpperCase() : ""}</span></td>
                 <td style={{ width: "28%" }}>STAFF SIGNATURE:<br />{p.approval && p.images[p.approval.signatureId] && <img className="sig" src={p.images[p.approval.signatureId]} alt={`Signature of ${p.approval.staffName}`} />}</td>
                 <td>COMMENTS:<br /><span className="hand" style={{ whiteSpace: "normal", fontSize: 20 }}>{p.approval?.comments}</span></td>
               </tr>
