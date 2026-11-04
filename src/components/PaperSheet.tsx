@@ -81,8 +81,10 @@ export function PaperSheet(p: Props) {
   })();
 
   // ----- Staff: sign selected rows -----
-  const signable = (r: SheetRow) => !r.isFuture && !r.entry?.staffSignature && (!!r.holiday || (!!r.entry && (r.entry.status !== "PRESENT" || (!!r.entry.startTime && !!r.entry.endTime))));
-  /** A present day with both times and no student signature: an admin can add it. */
+  /** Holidays (on the list, or a row marked Holiday) are never signed, by anyone. */
+  const isHoliday = (r: SheetRow) => !!r.holiday || r.entry?.status === "HOLIDAY";
+  const signable = (r: SheetRow) => !r.isFuture && !isHoliday(r) && !r.entry?.staffSignature && !!r.entry && (r.entry.status !== "PRESENT" || (!!r.entry.startTime && !!r.entry.endTime));
+  /** A present day with both times and no student signature: staff can fill it. */
   const missingStudent = (r: SheetRow) => !r.holiday && !!r.entry && r.entry.status === "PRESENT" && !!r.entry.startTime && !!r.entry.endTime && !r.entry.studentSignature;
   const pickedMissing = p.rows.filter((r) => picked.has(key(r.date)) && missingStudent(r)).length;
   const offerStudent = staff && pickedMissing > 0;
@@ -132,8 +134,8 @@ export function PaperSheet(p: Props) {
           pending={pending}
           studentFillable={p.rows.filter((r) => !r.isFuture && missingStudent(r)).map((r) => key(r.date))}
           staffFillable={p.rows.filter(signable).map((r) => key(r.date))}
-          studentOutdated={p.studentSignatureId ? p.rows.filter((r) => r.entry?.studentSignature && r.entry.studentSignature.id !== p.studentSignatureId).map((r) => key(r.date)) : []}
-          staffOutdated={p.staffSignatureId ? p.rows.filter((r) => r.entry?.staffSignature && r.entry.staffSignature.id !== p.staffSignatureId).map((r) => key(r.date)) : []}
+          studentOutdated={p.studentSignatureId ? p.rows.filter((r) => !isHoliday(r) && r.entry?.studentSignature && r.entry.studentSignature.id !== p.studentSignatureId).map((r) => key(r.date)) : []}
+          staffOutdated={p.staffSignatureId ? p.rows.filter((r) => !isHoliday(r) && r.entry?.staffSignature && r.entry.staffSignature.id !== p.staffSignatureId).map((r) => key(r.date)) : []}
           run={run}
         />
       )}
@@ -185,22 +187,18 @@ export function PaperSheet(p: Props) {
                       </>
                     )}
                     <td>
-                      {e?.studentSignature && p.images[e.studentSignature.id] && <img className="sig" src={p.images[e.studentSignature.id]} alt={`Student signature, ${usDate(r.date)}`} />}
-                      {staff && e?.studentSignature?.addedBy && <span className="small muted no-print" style={{ display: "block" }}>added by {e.studentSignature.addedBy.staffName}</span>}
+                      {!isHoliday(r) && e?.studentSignature && p.images[e.studentSignature.id] && <img className="sig" src={p.images[e.studentSignature.id]} alt={`Student signature, ${usDate(r.date)}`} />}
                       {staff && !r.isFuture && missingStudent(r) && (p.studentHasSignature
                         ? <button className="fill no-print" disabled={pending} onClick={() => fillStudent(r)} aria-label={`Fill student signature, ${usDate(r.date)}`}>Fill with signature</button>
                         : <a className="small no-print" href="#signatures">No signature on file</a>)}
-                      {staff && e?.studentSignature && p.studentSignatureId && e.studentSignature.id !== p.studentSignatureId && (
+                      {staff && !isHoliday(r) && e?.studentSignature && p.studentSignatureId && e.studentSignature.id !== p.studentSignatureId && (
                         <button className="edit no-print" disabled={pending} onClick={() => run(() => replaceRowSignatureAction(k, "student"))}>Use new signature</button>
                       )}
                     </td>
                     <td>
-                      {e?.staffSignature && p.images[e.staffSignature.id] && <img className="sig" src={p.images[e.staffSignature.id]} alt={`Signed by ${e.staffSignature.staffName}`} title={e.staffSignature.staffName} />}
+                      {!isHoliday(r) && e?.staffSignature && p.images[e.staffSignature.id] && <img className="sig" src={p.images[e.staffSignature.id]} alt={`Signed by ${e.staffSignature.staffName}`} title={e.staffSignature.staffName} />}
                       {staff && signable(r) && p.hasSavedSignature && (
                         <button className="fill no-print" disabled={pending} onClick={() => fillStaff(r)} aria-label={`Fill staff signature, ${usDate(r.date)}`}>Fill with my signature</button>
-                      )}
-                      {staff && e?.staffSignature && p.staffSignatureId && e.staffSignature.id !== p.staffSignatureId && (
-                        <button className="edit no-print" disabled={pending} onClick={() => run(() => replaceRowSignatureAction(k, "staff"))}>Re-sign with mine</button>
                       )}
                     </td>
                   </tr>
@@ -232,7 +230,7 @@ export function PaperSheet(p: Props) {
             ? <button className="btn" disabled={pending} onClick={signPicked}>Sign {picked.size} with my signature</button>
             : <a className="btn" href="/staff/account">Put your signature on file first</a>}
           {offerStudent && p.hasSavedSignature && (p.studentHasSignature ? (
-            <label className="small" title="Uses the student's signature on file. Recorded as added by you.">
+            <label className="small" title="Uses the student's signature on file.">
               <input type="checkbox" className="chk" checked={withStudent} onChange={(e) => setWithStudent(e.target.checked)} />{" "}
               Also add student signature ({pickedMissing} row{pickedMissing === 1 ? "" : "s"})
             </label>
@@ -350,7 +348,7 @@ function SignaturePanel(p: {
     p.run(() => signRowsAction({}, fd));
   };
   const updateAll = (which: "student" | "staff", keys: string[]) => {
-    if (which === "staff" && !window.confirm(`Re-sign ${n(keys.length, "row")} with your signature? You become the staff member who signed them.`)) return;
+    if (which === "staff" && !window.confirm(`Update ${n(keys.length, "row")} to your current signature?`)) return;
     p.run(async () => {
       let done = 0; let last: ActionState = {};
       for (const k of keys) { last = await replaceRowSignatureAction(k, which); if (last.ok) done++; }
@@ -378,7 +376,7 @@ function SignaturePanel(p: {
           )}
           {img && outdated.length > 0 && (
             <button className="btn ghost" disabled={p.pending} onClick={() => updateAll(which, outdated)}>
-              {isStudent ? `Update ${n(outdated.length, "older row")}` : `Re-sign ${n(outdated.length, "row")} with mine`}
+              {`Update ${n(outdated.length, "older row")}`}
             </button>
           )}
           <button className={`btn ${img ? "ghost" : ""}`} onClick={() => setOpen(open === which ? null : which)} aria-expanded={open === which}>

@@ -32,17 +32,21 @@ export async function staffLogoutAction() {
   redirect("/staff/login");
 }
 
-/** A row can be signed by staff once the day is decided: times complete, or absent / excused / holiday. */
+/**
+ * A row can be signed by staff once the day is decided: times complete, or absent / excused.
+ * Holidays (on the holiday list, or a row marked Holiday) are never signed.
+ */
 const NO_SIG = "Put your signature on file first (My account), then sign with one tap.";
+const isHolidayRow = (e: Entry | null, holiday: boolean) => holiday || e?.status === "HOLIDAY";
 const signable = (e: Entry | null, holiday: boolean) =>
-  holiday || (!!e && (e.status !== "PRESENT" || (!!e.startTime && !!e.endTime)));
+  !isHolidayRow(e, holiday) && !!e && (e.status !== "PRESENT" || (!!e.startTime && !!e.endTime));
 
 /** A present day with both times, the only kind of row a student signs. */
 const needsStudentSig = (e: Entry | null) => !!e && e.status === "PRESENT" && !!e.startTime && !!e.endTime && !e.studentSignature;
 
 /**
  * Staff signs many rows at once (the "Staff signature" column), with one drawing or their saved
- * signature. Rows already signed by staff are left alone. Holiday rows get a HOLIDAY entry.
+ * signature. Rows already signed by staff are left alone. Holidays are skipped: no signatures.
  *
  * Staff can also add the student's signature on file, in the same step, to present rows that
  * don't have one (e.g. staff wrote the times because the student forgot to tap End). This is
@@ -59,7 +63,7 @@ export async function signRowsAction(_: ActionState, fd: FormData): Promise<Acti
   const holidays = await holidaysBetween(dates.reduce((a, b) => (a < b ? a : b)), dates.reduce((a, b) => (a > b ? a : b)));
   const now = new Date();
   const sig = { id: staff.signatureId, at: now, staffId: staff._id, staffName: staff.name };
-  let signed = 0, studentSigned = 0;
+  let signed = 0, studentSigned = 0, holidaysSkipped = 0;
   const skipped: string[] = [];
   const noStudentSig: string[] = [];
   for (const key of new Set(keys.data)) {
@@ -70,14 +74,8 @@ export async function signRowsAction(_: ActionState, fd: FormData): Promise<Acti
     if (!isClassDay(student, date)) { skipped.push(`${student.name} ${usDate(date)}: not a class day`); continue; }
     const holiday = holidays.get(date);
     const e = await entries.findOne({ _id: key });
+    if (isHolidayRow(e, !!holiday)) { holidaysSkipped++; continue; }
     if (!signable(e, !!holiday)) { skipped.push(`${student.name} ${usDate(date)}: not finished`); continue; }
-    if (!e && holiday) {
-      await entries.updateOne(
-        { _id: key },
-        { $setOnInsert: { studentId, date, status: "HOLIDAY" as EntryStatus, startAt: null, endAt: null, startTime: null, endTime: null, minutes: null, studentSignature: null, note: holiday, history: [], updatedAt: now } },
-        { upsert: true },
-      );
-    }
     if (wantsStudentSig && needsStudentSig(e)) {
       if (!student.signatureId) noStudentSig.push(student.name);
       else {
@@ -100,13 +98,14 @@ export async function signRowsAction(_: ActionState, fd: FormData): Promise<Acti
     const res = await entries.updateOne({ _id: key, staffSignature: null }, { $set: { staffSignature: sig, updatedAt: now } });
     if (res.modifiedCount) signed++;
   }
-  await audit(staff._id, "staff.sign_rows", "entries", { signed, studentSigned, skipped: skipped.length });
+  await audit(staff._id, "staff.sign_rows", "entries", { signed, studentSigned, skipped: skipped.length, holidaysSkipped });
   refresh();
   const list = (xs: string[]) => `${xs.slice(0, 5).join("; ")}${xs.length > 5 ? ` and ${xs.length - 5} more` : ""}`;
   const names = [...new Set(noStudentSig)];
   const extra =
     (studentSigned ? ` Added the student's signature to ${studentSigned} of them.` : "") +
     (names.length ? ` No signature on file for ${list(names)}, so their row${noStudentSig.length === 1 ? " has" : "s have"} no student signature yet.` : "") +
+    (holidaysSkipped ? ` Holidays are left unsigned (${holidaysSkipped}).` : "") +
     (skipped.length ? ` Not signed: ${list(skipped)}.` : "");
   return signed ? { ok: true, message: `Signed ${signed} row${signed === 1 ? "" : "s"}.${extra}` } : { error: `Nothing was signed.${extra}` };
 }
@@ -127,6 +126,7 @@ async function addStudentSignature(staff: StaffDoc, rowKey: string): Promise<{ o
   if (!student || !canSee(staff, student)) return { ok: false, message: "That student isn't in your courses." };
   if (!student.signatureId) return { ok: false, message: `${student.name} has no signature on file. Add it at the top of the sheet first.` };
   const e = await entries.findOne({ _id: rowKey });
+  if (isHolidayRow(e, (await holidaysBetween(date, date)).has(date))) return { ok: false, message: `${usDate(date)} is a holiday: no signature needed.` };
   if (e?.studentSignature) return { ok: false, message: `${usDate(date)} already has the student's signature.` };
   if (!needsStudentSig(e)) return { ok: false, message: `${usDate(date)}: enter the start and end time first.` };
   const now = new Date();

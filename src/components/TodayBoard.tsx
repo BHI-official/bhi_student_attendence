@@ -33,7 +33,8 @@ export function TodayBoard({ date, month, rows, holiday, hasSaved, isToday }: {
 
   /** A present day with both times and no student signature: staff can fill it. */
   const missingStudent = (r: BoardRow) => !holiday && r.status === "PRESENT" && !!r.start && !!r.end && !r.studentSigned;
-  const ready = (r: BoardRow) => !r.staffSigned && (!!holiday || (r.status !== null && (r.status !== "PRESENT" || (!!r.start && !!r.end))));
+  /** Holidays are never signed. */
+  const ready = (r: BoardRow) => !holiday && r.status !== "HOLIDAY" && !r.staffSigned && r.status !== null && (r.status !== "PRESENT" || (!!r.start && !!r.end));
   const shown = useMemo(() => {
     const t = q.trim().toLowerCase();
     return t ? rows.filter((r) => r.name.toLowerCase().includes(t) || r.course.toLowerCase().includes(t)) : rows;
@@ -82,7 +83,7 @@ export function TodayBoard({ date, month, rows, holiday, hasSaved, isToday }: {
 
   return (
     <>
-      {holiday && <p className="msg info">{holiday}: no class today. You can still sign the holiday rows.</p>}
+      {holiday && <p className="msg info">{holiday}: no class today, and no signatures needed.</p>}
       <p className="lead">
         {rows.length} with class · {counts.started} started · {counts.ended} ended · {counts.studentSigned} signed by student · {counts.staffSigned} signed by staff
       </p>
@@ -135,7 +136,7 @@ export function TodayBoard({ date, month, rows, holiday, hasSaved, isToday }: {
             ? <button className="btn" disabled={pending} onClick={sign}>Sign {picked.size} with my signature</button>
             : <a className="btn" href="/staff/account">Put your signature on file first</a>}
           {hasSaved && pickedMissing.length > 0 && (
-            <label className="small" title="Uses each student's signature on file. Recorded as added by you.">
+            <label className="small" title="Uses each student's signature on file.">
               <input type="checkbox" className="chk" checked={withStudent} onChange={(e) => setWithStudent(e.target.checked)} />{" "}
               Also add student signature ({pickedMissing.length - pickedNoFile} row{pickedMissing.length - pickedNoFile === 1 ? "" : "s"}
               {pickedNoFile ? `, ${pickedNoFile} with none on file` : ""})
