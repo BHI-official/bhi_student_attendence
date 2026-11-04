@@ -20,6 +20,9 @@ type Props = {
   approval: MonthApproval | null;
   approvalCurrent: boolean;
   hasSavedSignature?: boolean;
+  /** Staff mode: admins can add the student's signature on file while signing rows. */
+  isAdmin?: boolean;
+  studentHasSignature?: boolean;
   /** Signature images on this page, by id. */
   images: Record<string, string>;
   /** Student mode: the school's clock and the limits for typed times. */
@@ -46,6 +49,7 @@ export function PaperSheet(p: Props) {
   const [evidence, setEvidence] = useState(false);
   const [editing, setEditing] = useState<SheetRow | null>(null);
   const [typing, setTyping] = useState<"start" | "end" | null>(null);
+  const [withStudent, setWithStudent] = useState(true);
   const staff = p.mode === "staff";
   const key = (date: string) => `${p.student._id}:${date}`;
 
@@ -73,9 +77,14 @@ export function PaperSheet(p: Props) {
 
   // ----- Staff: sign selected rows -----
   const signable = (r: SheetRow) => !r.isFuture && !r.entry?.staffSignature && (!!r.holiday || (!!r.entry && (r.entry.status !== "PRESENT" || (!!r.entry.startTime && !!r.entry.endTime))));
+  /** A present day with both times and no student signature: an admin can add it. */
+  const missingStudent = (r: SheetRow) => !r.holiday && !!r.entry && r.entry.status === "PRESENT" && !!r.entry.startTime && !!r.entry.endTime && !r.entry.studentSignature;
+  const pickedMissing = p.rows.filter((r) => picked.has(key(r.date)) && missingStudent(r)).length;
+  const offerStudent = staff && !!p.isAdmin && pickedMissing > 0;
   const signPicked = () => {
     const fd = new FormData();
     fd.set("rows", JSON.stringify([...picked]));
+    if (offerStudent && withStudent && p.studentHasSignature) fd.set("withStudentSignature", "1");
     run(async () => { const r = await signRowsAction({}, fd); if (r.ok) setPicked(new Set()); return r; });
   };
   const toggle = (k: string) => setPicked((s) => { const n = new Set(s); if (n.has(k)) n.delete(k); else n.add(k); return n; });
@@ -149,7 +158,10 @@ export function PaperSheet(p: Props) {
                         <td>{e?.minutes != null && <span className="hand">{hoursText(e.minutes)}</span>}</td>
                       </>
                     )}
-                    <td>{e?.studentSignature && p.images[e.studentSignature.id] && <img className="sig" src={p.images[e.studentSignature.id]} alt={`Student signature, ${usDate(r.date)}`} />}</td>
+                    <td>
+                      {e?.studentSignature && p.images[e.studentSignature.id] && <img className="sig" src={p.images[e.studentSignature.id]} alt={`Student signature, ${usDate(r.date)}`} />}
+                      {staff && e?.studentSignature?.addedBy && <span className="small muted no-print" style={{ display: "block" }}>added by {e.studentSignature.addedBy.staffName}</span>}
+                    </td>
                     <td>{e?.staffSignature && p.images[e.staffSignature.id] && <img className="sig" src={p.images[e.staffSignature.id]} alt={`Signed by ${e.staffSignature.staffName}`} title={e.staffSignature.staffName} />}</td>
                   </tr>
                 );
@@ -179,6 +191,14 @@ export function PaperSheet(p: Props) {
           {p.hasSavedSignature
             ? <button className="btn" disabled={pending} onClick={signPicked}>Sign {picked.size} with my signature</button>
             : <a className="btn" href="/staff/account">Put your signature on file first</a>}
+          {offerStudent && p.hasSavedSignature && (p.studentHasSignature ? (
+            <label className="small" title="Uses the student's signature on file. Recorded as added by you.">
+              <input type="checkbox" className="chk" checked={withStudent} onChange={(e) => setWithStudent(e.target.checked)} />{" "}
+              Also add student signature ({pickedMissing} row{pickedMissing === 1 ? "" : "s"})
+            </label>
+          ) : (
+            <span className="small muted">{pickedMissing} row{pickedMissing === 1 ? " has" : "s have"} no student signature, and none is on file. <a href={`/staff/students/${s._id}`}>Add one</a></span>
+          ))}
           <button className="btn ghost" onClick={() => setPicked(new Set())}>Clear selection</button>
         </div>
       )}

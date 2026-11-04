@@ -1,10 +1,17 @@
 import "server-only";
+import dns from "node:dns";
 import { randomUUID } from "node:crypto";
 import { MongoClient, type Collection } from "mongodb";
 import { env } from "./env";
 import type { AuditLog, Entry, Holiday, MonthApproval, SignatureDoc, Staff, Student } from "./types";
 
 export * from "./types";
+
+// Local fix: this PC's DNS refuses the SRV lookup that mongodb+srv:// needs, so on the dev
+// machine ask Google / Cloudflare DNS instead. Production (Vercel) keeps its normal DNS.
+if (process.env.NODE_ENV !== "production") {
+  dns.setServers(["8.8.8.8", "1.1.1.1"]);
+}
 
 const g = globalThis as unknown as { mongo?: Promise<MongoClient> };
 

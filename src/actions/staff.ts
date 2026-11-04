@@ -37,22 +37,32 @@ const NO_SIG = "Put your signature on file first (My account), then sign with on
 const signable = (e: Entry | null, holiday: boolean) =>
   holiday || (!!e && (e.status !== "PRESENT" || (!!e.startTime && !!e.endTime)));
 
+/** A present day with both times, the only kind of row a student signs. */
+const needsStudentSig = (e: Entry | null) => !!e && e.status === "PRESENT" && !!e.startTime && !!e.endTime && !e.studentSignature;
+
 /**
  * Staff signs many rows at once (the "Staff signature" column), with one drawing or their saved
  * signature. Rows already signed by staff are left alone. Holiday rows get a HOLIDAY entry.
+ *
+ * Admins can also add the student's signature on file, in the same step, to present rows that
+ * don't have one (e.g. staff wrote the times because the student forgot to tap End). This is
+ * recorded on the signature, in the row's history and in the audit log.
  */
 export async function signRowsAction(_: ActionState, fd: FormData): Promise<ActionState> {
   const staff = await requireStaff();
   const keys = z.array(z.string().regex(/^[0-9a-f-]{36}:\d{4}-\d{2}-\d{2}$/)).max(1000).safeParse(JSON.parse(String(fd.get("rows") ?? "[]")));
   if (!keys.success || !keys.data.length) return { error: "Choose the rows to sign." };
   if (!staff.signatureId) return { error: NO_SIG };
+  const wantsStudentSig = fd.get("withStudentSignature") === "1";
+  if (wantsStudentSig && staff.role !== "ADMIN") return { error: "Only an admin can add a student's signature." };
   const { entries, students } = await cols();
   const dates = keys.data.map((k) => k.slice(37));
   const holidays = await holidaysBetween(dates.reduce((a, b) => (a < b ? a : b)), dates.reduce((a, b) => (a > b ? a : b)));
   const now = new Date();
   const sig = { id: staff.signatureId, at: now, staffId: staff._id, staffName: staff.name };
-  let signed = 0;
+  let signed = 0, studentSigned = 0;
   const skipped: string[] = [];
+  const noStudentSig: string[] = [];
   for (const key of new Set(keys.data)) {
     const [studentId, date] = [key.slice(0, 36), key.slice(37)];
     if (date > today()) { skipped.push(`${usDate(date)} is in the future`); continue; }
@@ -69,12 +79,36 @@ export async function signRowsAction(_: ActionState, fd: FormData): Promise<Acti
         { upsert: true },
       );
     }
+    if (wantsStudentSig && needsStudentSig(e)) {
+      if (!student.signatureId) noStudentSig.push(student.name);
+      else {
+        // Both signatures in one write, and only if neither was added in the meantime.
+        const studentSignature = { id: student.signatureId, at: now, addedBy: { staffId: staff._id, staffName: staff.name } };
+        const res = await entries.updateOne(
+          { _id: key, staffSignature: null, studentSignature: null },
+          {
+            $set: { staffSignature: sig, studentSignature, updatedAt: now },
+            $push: { history: { at: now, byId: staff._id, byName: staff.name, what: "student signature on file added by admin", reason: "signed with staff signature" } },
+          },
+        );
+        if (res.modifiedCount) {
+          signed++; studentSigned++;
+          await audit(staff._id, "staff.add_student_signature", key, { signatureId: student.signatureId });
+          continue;
+        }
+      }
+    }
     const res = await entries.updateOne({ _id: key, staffSignature: null }, { $set: { staffSignature: sig, updatedAt: now } });
     if (res.modifiedCount) signed++;
   }
-  await audit(staff._id, "staff.sign_rows", "entries", { signed, skipped: skipped.length });
+  await audit(staff._id, "staff.sign_rows", "entries", { signed, studentSigned, skipped: skipped.length });
   refresh();
-  const extra = skipped.length ? ` Not signed: ${skipped.slice(0, 5).join("; ")}${skipped.length > 5 ? ` and ${skipped.length - 5} more` : ""}.` : "";
+  const list = (xs: string[]) => `${xs.slice(0, 5).join("; ")}${xs.length > 5 ? ` and ${xs.length - 5} more` : ""}`;
+  const names = [...new Set(noStudentSig)];
+  const extra =
+    (studentSigned ? ` Added the student's signature to ${studentSigned} of them.` : "") +
+    (names.length ? ` No signature on file for ${list(names)}, so their row${noStudentSig.length === 1 ? " has" : "s have"} no student signature yet.` : "") +
+    (skipped.length ? ` Not signed: ${list(skipped)}.` : "");
   return signed ? { ok: true, message: `Signed ${signed} row${signed === 1 ? "" : "s"}.${extra}` } : { error: `Nothing was signed.${extra}` };
 }
 
