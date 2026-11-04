@@ -38,7 +38,7 @@ function rowCells(r: SheetData["rows"][number]) {
   const holidayRow = !!r.holiday || e?.status === "HOLIDAY";
   const off = r.holiday ?? (e && e.status !== "PRESENT" ? STATUS_WORD[e.status] + (e.note ? ` (${e.note})` : "") : null);
   return {
-    day: r.weekdayName.toUpperCase(), date: usDate(r.date), off,
+        day: r.weekdayName.toUpperCase(), date: usDate(r.date), off, holiday: holidayRow,
     start: off ? "" : time12(e?.startTime ?? null), end: off ? "" : time12(e?.endTime ?? null), hours: off ? "" : hoursText(e?.minutes),
     // Holidays carry no signatures, even if one was added before this rule.
     studentSig: holidayRow ? null : e?.studentSignature?.id ?? null, staffSig: holidayRow ? null : e?.staffSignature?.id ?? null,
@@ -167,15 +167,18 @@ async function pdfMonth(c: PdfCtx, sheet: SheetData) {
     const v = rowCells(r);
     x = L;
     const xs = cols.map((col) => { const at = x; x += col.w; return at; });
-    cols.forEach((col, i) => { if (!(v.off && (i === 2 || i === 3 || i === 4))) box(xs[i], y, col.w, rowH); });
-    if (v.off) box(xs[2], y, cols[2].w + cols[3].w + cols[4].w, rowH);
+        // Holiday: one open cell from START TIME to the end of the row (no column lines).
+    // Absent / Excused: one cell over the three time columns; signatures stay.
+    const spanTo = v.holiday ? 6 : v.off ? 4 : 1;
+    cols.forEach((col, i) => { if (i < 2 || i > spanTo) box(xs[i], y, col.w, rowH); });
+    if (spanTo > 1) box(xs[2], y, cols.slice(2, spanTo + 1).reduce((t, col) => t + col.w, 0), rowH);
     const mid = y + rowH / 2 - 3;
     const offSize = fs + 1;
     text(page, v.day, xs[0] + 3, mid, 7);
     text(page, v.date, xs[1] + 3, mid, 8);
     if (v.off) {
       // Holiday / Absent / Excused: bold, centred across the three time columns.
-      const spanW = cols[2].w + cols[3].w + cols[4].w;
+            const spanW = cols.slice(2, spanTo + 1).reduce((t, col) => t + col.w, 0);
       let t = v.off.toUpperCase();
       while (t.length > 3 && bold.widthOfTextAtSize(t, offSize) > spanW - 8) t = t.slice(0, -2) + "…";
       text(page, t, xs[2] + (spanW - bold.widthOfTextAtSize(t, offSize)) / 2, y + rowH / 2 - offSize * 0.35, offSize, bold, ink);
@@ -315,6 +318,8 @@ export async function buildDocx(report: Report): Promise<Buffer> {
     const rows = sheet.rows.map((r) => {
       const v = rowCells(r);
       const first = [cell(v.day, { width: widths[0], size: 14 }), cell(v.date, { width: widths[1] })];
+            // Holiday: one cell to the end of the row (no column lines, no signature cells).
+      if (v.holiday) return new TableRow({ children: [...first, cell((v.off ?? "Holiday").toUpperCase(), { span: 5, ink: true, bold: true, center: true, size: 20, width: widths[2] + widths[3] + widths[4] + widths[5] + widths[6] })] });
       const mid = v.off
         ? [cell(v.off.toUpperCase(), { span: 3, ink: true, bold: true, center: true, size: 20, width: widths[2] + widths[3] + widths[4] })]
         : [cell(v.start, { width: widths[2], ink: true, size: 18 }), cell(v.end, { width: widths[3], ink: true, size: 18 }), cell(v.hours, { width: widths[4], ink: true, size: 18 })];

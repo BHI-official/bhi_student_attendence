@@ -177,7 +177,10 @@ export function PaperSheet(p: Props) {
                       {usDate(r.date)}
                       {staff && !r.isFuture && <><br /><button className="edit no-print" onClick={() => setEditing(r)}>Edit</button></>}
                     </td>
-                    {off ? (
+                    {isHoliday(r) ? (
+                      // Holiday: one open cell to the end of the row, no column lines.
+                      <td colSpan={5} className="span hand" style={{ textAlign: "center", fontWeight: 700 }}>{r.holiday ?? (e?.note || STATUS_WORD.HOLIDAY)}</td>
+                    ) : off ? (
                       <td colSpan={3} className="span hand" style={{ textAlign: "center" }}>{r.holiday ? r.holiday : STATUS_WORD[e!.status]}{e?.note && !r.holiday ? ` (${e.note})` : ""}</td>
                     ) : (
                       <>
@@ -186,21 +189,23 @@ export function PaperSheet(p: Props) {
                         <td>{e?.minutes != null && <span className="hand">{hoursText(e.minutes)}</span>}</td>
                       </>
                     )}
+                    {!isHoliday(r) && <>
                     <td>
-                      {!isHoliday(r) && e?.studentSignature && p.images[e.studentSignature.id] && <img className="sig" src={p.images[e.studentSignature.id]} alt={`Student signature, ${usDate(r.date)}`} />}
+                      {e?.studentSignature && p.images[e.studentSignature.id] && <img className="sig" src={p.images[e.studentSignature.id]} alt={`Student signature, ${usDate(r.date)}`} />}
                       {staff && !r.isFuture && missingStudent(r) && (p.studentHasSignature
                         ? <button className="fill no-print" disabled={pending} onClick={() => fillStudent(r)} aria-label={`Fill student signature, ${usDate(r.date)}`}>Fill with signature</button>
                         : <a className="small no-print" href="#signatures">No signature on file</a>)}
-                      {staff && !isHoliday(r) && e?.studentSignature && p.studentSignatureId && e.studentSignature.id !== p.studentSignatureId && (
+                      {staff && e?.studentSignature && p.studentSignatureId && e.studentSignature.id !== p.studentSignatureId && (
                         <button className="edit no-print" disabled={pending} onClick={() => run(() => replaceRowSignatureAction(k, "student"))}>Use new signature</button>
                       )}
                     </td>
                     <td>
-                      {!isHoliday(r) && e?.staffSignature && p.images[e.staffSignature.id] && <img className="sig" src={p.images[e.staffSignature.id]} alt={`Signed by ${e.staffSignature.staffName}`} title={e.staffSignature.staffName} />}
+                      {e?.staffSignature && p.images[e.staffSignature.id] && <img className="sig" src={p.images[e.staffSignature.id]} alt={`Signed by ${e.staffSignature.staffName}`} title={e.staffSignature.staffName} />}
                       {staff && signable(r) && p.hasSavedSignature && (
                         <button className="fill no-print" disabled={pending} onClick={() => fillStaff(r)} aria-label={`Fill staff signature, ${usDate(r.date)}`}>Fill with my signature</button>
                       )}
                     </td>
+                    </>}
                   </tr>
                 );
               })}
