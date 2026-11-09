@@ -60,3 +60,32 @@ export function ImportForm({ action }: { action: Act }) {
     </form>
   );
 }
+
+export type ProfileValues = { phone: string; email: string; address: string; emergencyName: string; emergencyPhone: string; social: string };
+
+/** Contact and social details on the profile (admins). */
+export function ProfileForm({ action, values }: { action: Act; values: ProfileValues }) {
+  return (
+    <ActionForm action={action}>
+      <div className="grid2">
+        <Field name="phone" label="Phone" type="tel" defaultValue={values.phone} />
+        <Field name="email" label="Email" type="email" defaultValue={values.email} />
+        <Field name="emergencyName" label="Emergency contact" defaultValue={values.emergencyName} placeholder="Name and relationship" />
+        <Field name="emergencyPhone" label="Emergency contact phone" type="tel" defaultValue={values.emergencyPhone} />
+      </div>
+      <Field name="address" label="Address" defaultValue={values.address} />
+      <Field name="social" label="Social information" type="textarea" defaultValue={values.social} placeholder="Housing, transport, benefits, support needs, anything staff should know" />
+      <Submit>Save profile</Submit>
+    </ActionForm>
+  );
+}
+
+/** Give a new PIN: typed by the admin, or random. */
+export function PinForm({ action, name }: { action: Act; name: string }) {
+  return (
+    <ActionForm action={action} confirm={`Give ${name} a new PIN? The old one stops working.`}>
+      <Field name="pin" label="New PIN (optional: leave empty for a random one)" inputMode="numeric" />
+      <Submit>Give a new PIN</Submit>
+    </ActionForm>
+  );
+}

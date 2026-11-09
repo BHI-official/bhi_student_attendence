@@ -119,10 +119,6 @@ h2 { font-size: 21px; margin: 28px 0 10px; color: var(--navy-deep); }
 
 /* Full-screen signature box (big enough to write comfortably on a phone or tablet) */
 .sigmodal { position: fixed; inset: 0; z-index: 50; background: rgba(15, 25, 50, .6); display: grid; place-items: center; padding: 12px; }
-.sigbox { background: #fff; border-radius: 14px; width: min(1100px, 100%); height: min(640px, 100%); display: grid; grid-template-rows: auto 1fr auto; overflow: hidden; }
-.sigbox header { padding: 14px 18px; font-weight: 700; font-size: 20px; border-bottom: 1px solid var(--line); }
-.sigbox canvas { width: 100%; height: 100%; touch-action: none; cursor: crosshair; background: linear-gradient(transparent calc(100% - 70px), #9aa5b8 calc(100% - 70px), #9aa5b8 calc(100% - 68px), transparent calc(100% - 68px)); }
-.sigbox footer { display: flex; gap: 10px; justify-content: flex-end; padding: 12px 16px; border-top: 1px solid var(--line); flex-wrap: wrap; }
 
 /* Typing a start or end time */
 .timebox { width: min(460px, 100%); margin: 0; }
@@ -162,3 +158,63 @@ dialog .inner { padding: 20px; }
 .sigbox { background: #fff; border: 1.5px solid var(--line); border-radius: 10px; height: 92px; display: flex; align-items: center; justify-content: center; padding: 10px; }
 .sigbox img { max-height: 70px; max-width: 100%; }
 .sigbox.empty { border-style: dashed; color: var(--muted); font-size: 14px; }
+
+/* ---------- Handwriting: enlarged pad and the field bubble ---------- */
+.inkmodal { position: fixed; inset: 0; z-index: 60; background: rgba(15, 25, 50, .62); display: grid; place-items: center; padding: max(10px, env(safe-area-inset-top)) 10px max(10px, env(safe-area-inset-bottom)); overscroll-behavior: contain; }
+.inkbox { background: #fff; border-radius: 14px; width: min(1100px, 100%); height: min(680px, 100%); display: grid; grid-template-rows: auto 1fr auto auto; overflow: hidden; outline: none; }
+.inkbox.note { height: min(760px, 100%); }
+.inkbox header { padding: 12px 18px; border-bottom: 1px solid var(--line); }
+.inkbox header h2 { margin: 0; font-size: 20px; }
+.inkbox header p { margin: 4px 0 0; color: var(--muted); font-size: 15px; }
+.inkarea { position: relative; min-height: 180px; }
+.inkarea canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: crosshair; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.inkbox.note .inkarea { background: repeating-linear-gradient(to bottom, transparent 0, transparent 55px, #d9e0ea 55px, #d9e0ea 56px); }
+.inkline { position: absolute; left: 6%; right: 6%; bottom: 28%; border-bottom: 2px solid #9aa5b8; pointer-events: none; }
+.inkline span { position: absolute; left: -4px; bottom: 2px; color: #9aa5b8; font-size: 22px; font-weight: 700; }
+.inkempty { position: absolute; inset: 0; display: grid; place-items: center; color: #b4bccb; font-size: clamp(22px, 4vw, 36px); font-family: var(--hand); pointer-events: none; }
+.inkmsg { margin: 0 16px 8px; }
+.inkbox footer { display: flex; gap: 10px; justify-content: space-between; padding: 12px 16px; border-top: 1px solid var(--line); flex-wrap: wrap; }
+.inkfield { margin-bottom: 14px; }
+.inkfield > label { display: block; font-weight: 700; font-size: 15px; margin-bottom: 6px; }
+.inkbubble { display: flex; align-items: center; justify-content: center; width: 100%; min-height: 88px; padding: 8px; background: #fff; border: 2px dashed var(--ink); border-radius: 10px; color: var(--ink); font-weight: 700; font-size: 17px; cursor: pointer; }
+.inkbubble.note { min-height: 110px; }
+.inkbubble.filled { border-style: solid; border-color: var(--line); }
+.inkbubble:focus-visible, .linkbtn:focus-visible { outline: 3px solid var(--highlight); outline-offset: 2px; }
+.inkbubble img { max-height: 90px; max-width: 100%; }
+.inkbubble.note img { max-height: 140px; }
+.inkfield.compact .inkbubble { min-height: 54px; font-size: 15px; }
+.inkfield.compact .inkbubble img { max-height: 46px; }
+.linkbtn { background: none; border: 0; padding: 4px 0; color: var(--navy); text-decoration: underline; cursor: pointer; font: inherit; }
+.ink-note { max-height: 60px; max-width: 220px; display: block; }
+
+/* ---------- Edit lock, comments ---------- */
+.lock { display: inline-block; font-size: 12px; font-weight: 700; color: var(--muted); }
+.cmt { display: inline-block; margin-top: 2px; font-size: 12px; font-weight: 700; color: var(--navy); background: #eef1fb; border: 0; border-radius: 999px; padding: 2px 8px; cursor: pointer; }
+.comments { margin-top: 14px; font-size: 13px; }
+.comments h3 { font-size: 13px; margin: 0 0 4px; }
+.comments li { margin-bottom: 4px; }
+.cmtlist { list-style: none; padding: 0; margin: 0 0 12px; max-height: 260px; overflow: auto; }
+.cmtlist li { border-bottom: 1px solid var(--line); padding: 8px 0; }
+
+/* ---------- Attendance colour (profile, lists, reports) ---------- */
+.level { display: inline-flex; align-items: center; gap: 8px; font-weight: 700; }
+.level::before { content: ""; width: 14px; height: 14px; border-radius: 50%; background: #aab2c0; flex: none; box-shadow: 0 0 0 2px #fff, 0 0 0 3px currentColor; }
+.level.good { color: var(--ok); } .level.good::before { background: #1f9d55; }
+.level.attention { color: #9a5b00; } .level.attention::before { background: #f08c00; }
+.level.poor { color: var(--danger); } .level.poor::before { background: #d92d20; }
+.level.none { color: var(--muted); }
+.profile-head { display: grid; grid-template-columns: 1fr auto; gap: 12px 24px; align-items: start; }
+.profile-head h1 { margin: 4px 0 6px; }
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 2px 24px; margin: 0; }
+.facts div { padding: 8px 0; border-bottom: 1px solid var(--line); }
+.facts dt { font-size: 13px; color: var(--muted); }
+.facts dd { margin: 2px 0 0; font-weight: 700; overflow-wrap: anywhere; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; }
+.stat { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: #fff; }
+.stat b { display: block; font-size: 26px; line-height: 1.1; }
+.stat span { font-size: 13px; color: var(--muted); }
+.ratebar { height: 10px; background: #edf0f5; border-radius: 999px; overflow: hidden; margin-top: 8px; }
+.ratebar i { display: block; height: 100%; }
+.ratebar i.good { background: #1f9d55; } .ratebar i.attention { background: #f08c00; } .ratebar i.poor { background: #d92d20; }
+@media (max-width: 640px) { .profile-head { grid-template-columns: 1fr; } }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }

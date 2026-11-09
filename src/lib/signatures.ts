@@ -1,27 +1,20 @@
 import "server-only";
 import { cols, newId, type SignatureDoc } from "./db";
+import { checkInkPng } from "./png";
 
-const MAX_BYTES = 300_000;
+/** A signature image from the browser (photo cleaned up, or drawn). Returns the data URL, or a message. */
+export const checkSignaturePng = (input: unknown) => checkInkPng(input, "SIGNATURE");
+/** Handwriting written into a note or comment field. */
+export const checkNotePng = (input: unknown) => checkInkPng(input, "NOTE");
 
 /**
- * Checks a signature image really is a reasonable PNG (the browser has already cleaned it up:
- * background removed, cropped and scaled). Returns the data URL, or an error message.
+ * Stores a signature or handwriting image once. Images are never deleted or changed: rows point
+ * at the exact image they were signed with, so historical records keep their signatures.
  */
-export function checkSignaturePng(input: unknown): { png: string } | { error: string } {
-  const s = typeof input === "string" ? input : "";
-  const m = /^data:image\/png;base64,([A-Za-z0-9+/=]+)$/.exec(s);
-  if (!m) return { error: "Add a signature first." };
-  const buf = Buffer.from(m[1], "base64");
-  if (buf.length > MAX_BYTES) return { error: "The signature image is too large." };
-  // PNG magic bytes, then the IHDR chunk with width and height.
-  if (buf.length < 24 || buf.readUInt32BE(0) !== 0x89504e47 || buf.toString("ascii", 12, 16) !== "IHDR") return { error: "That isn't a valid image." };
-  const w = buf.readUInt32BE(16), h = buf.readUInt32BE(20);
-  if (w < 40 || h < 15 || w > 1200 || h > 600) return { error: "The signature is too small to read. Write it bigger and try again." };
-  return { png: s };
-}
-
-export async function saveSignature(ownerType: SignatureDoc["ownerType"], ownerId: string, png: string, source: SignatureDoc["source"], createdBy: string) {
-  const doc: SignatureDoc = { _id: newId(), ownerType, ownerId, png, source, createdAt: new Date(), createdBy };
+export async function saveSignature(
+  ownerType: SignatureDoc["ownerType"], ownerId: string, png: string, source: SignatureDoc["source"], createdBy: string, kind: SignatureDoc["kind"] = "SIGNATURE",
+) {
+  const doc: SignatureDoc = { _id: newId(), ownerType, ownerId, png, source, kind, createdAt: new Date(), createdBy };
   await (await cols()).signatures.insertOne(doc);
   return doc._id;
 }

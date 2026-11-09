@@ -5,13 +5,14 @@ import { useRouter } from "next/navigation";
 import type { ActionState } from "@/lib/action";
 import type { Entry, MonthApproval, Student } from "@/lib/types";
 import { LATE_ENTRY_FLAG_MINUTES, clockIn, hoursText, monthTitle, time12, toMinutes, usDate, type SheetRow } from "@/lib/sheet";
-import { studentFillAction, studentStartAction } from "@/actions/student";
-import { approveMonthAction, editRowAction, fillStudentSignatureAction, fillStudentSignaturesAction, replaceRowSignatureAction, saveMySignatureAction, signRowsAction } from "@/actions/staff";
+import { studentCommentAction, studentFillAction, studentSignRowAction, studentStartAction } from "@/actions/student";
+import { addCommentAction, approveMonthAction, editRowAction, fillStudentSignatureAction, fillStudentSignaturesAction, replaceRowSignatureAction, saveMySignatureAction, signRowsAction } from "@/actions/staff";
 import { setStudentSignatureAction } from "@/actions/admin";
 import { SignatureOnFile } from "./SignatureCapture";
 import { Msg } from "./forms";
 import { TimeEntry, type SchoolClock } from "./TimeEntry";
 import { Letterhead } from "./Brand";
+import { InkField, InkPad, type InkValue } from "./Ink";
 
 type Props = {
   mode: "student" | "staff";
@@ -32,6 +33,12 @@ type Props = {
   images: Record<string, string>;
   /** Student mode: the school's clock and the limits for typed times. */
   clock?: SchoolClock;
+  /** Rows dated before this are locked (older than the editing window). Only admins change them. */
+  firstOpenDate: string;
+  editWindowDays: number;
+  /** Staff mode: the viewer is an admin (can change locked rows, replace others' approvals). */
+  isAdmin?: boolean;
+  staffId?: string;
 };
 
 const STATUS_WORD: Record<string, string> = { ABSENT: "Absent", EXCUSED: "Excused", HOLIDAY: "Holiday" };
@@ -55,8 +62,14 @@ export function PaperSheet(p: Props) {
   const [editing, setEditing] = useState<SheetRow | null>(null);
   const [typing, setTyping] = useState<"start" | "end" | null>(null);
   const [withStudent, setWithStudent] = useState(true);
+  /** A handwriting pad open for: signing rows as staff, or the student signing one of their days. */
+  const [handFor, setHandFor] = useState<{ who: "staff"; keys: string[]; fromSelection: boolean } | { who: "student"; date: string } | null>(null);
+  const [commentsFor, setCommentsFor] = useState<SheetRow | null>(null);
   const staff = p.mode === "staff";
   const key = (date: string) => `${p.student._id}:${date}`;
+  /** Older than the editing window. Teachers can't change these rows; admins can. */
+  const locked = (r: SheetRow) => r.date < p.firstOpenDate;
+  const canChange = (r: SheetRow) => staff && !r.isFuture && (!locked(r) || !!p.isAdmin);
 
   const run = (fn: () => Promise<ActionState>) =>
     start(async () => {
@@ -74,6 +87,9 @@ export function PaperSheet(p: Props) {
     if (col === "end" && e?.startTime && !e.endTime) return <button className="fill go" disabled={pending} onClick={() => setTyping("end")}>Enter end time</button>;
     return null;
   };
+  /** Student: a day of theirs with both times but no signature yet, still open, not yet validated by staff. */
+  const studentCanSign = (r: SheetRow) => !staff && !r.isFuture && !locked(r) && !r.holiday && !!r.entry && r.entry.status === "PRESENT"
+    && !!r.entry.startTime && !!r.entry.endTime && !r.entry.studentSignature && !r.entry.staffSignature;
   const startForEnd = (() => {
     const e = todayRow?.entry;
     if (!e?.startTime || !p.clock) return undefined;
@@ -83,23 +99,32 @@ export function PaperSheet(p: Props) {
   // ----- Staff: sign selected rows -----
   /** Holidays (on the list, or a row marked Holiday) are never signed, by anyone. */
   const isHoliday = (r: SheetRow) => !!r.holiday || r.entry?.status === "HOLIDAY";
-  const signable = (r: SheetRow) => !r.isFuture && !isHoliday(r) && !r.entry?.staffSignature && !!r.entry && (r.entry.status !== "PRESENT" || (!!r.entry.startTime && !!r.entry.endTime));
+  const signable = (r: SheetRow) => canChange(r) && !isHoliday(r) && !r.entry?.staffSignature && !!r.entry && (r.entry.status !== "PRESENT" || (!!r.entry.startTime && !!r.entry.endTime));
   /** A present day with both times and no student signature: staff can fill it. */
   const missingStudent = (r: SheetRow) => !r.holiday && !!r.entry && r.entry.status === "PRESENT" && !!r.entry.startTime && !!r.entry.endTime && !r.entry.studentSignature;
   const pickedMissing = p.rows.filter((r) => picked.has(key(r.date)) && missingStudent(r)).length;
   const offerStudent = staff && pickedMissing > 0;
-  const signPicked = () => {
+  /** Sign rows as staff: with the signature on file, or with one just written by hand. */
+  const signRows = (keys: string[], handPng?: string, fromSelection = false) => {
     const fd = new FormData();
-    fd.set("rows", JSON.stringify([...picked]));
-    if (offerStudent && withStudent && p.studentHasSignature) fd.set("withStudentSignature", "1");
-    run(async () => { const r = await signRowsAction({}, fd); if (r.ok) setPicked(new Set()); return r; });
+    fd.set("rows", JSON.stringify(keys));
+    if (handPng) fd.set("signature", handPng);
+    // The "Also add student signature" box belongs to the selection bar.
+    if (fromSelection && offerStudent && withStudent && p.studentHasSignature) fd.set("withStudentSignature", "1");
+    run(async () => { const r = await signRowsAction({}, fd); if (r.ok) setPicked((x) => { const n = new Set(x); keys.forEach((k) => n.delete(k)); return n; }); return r; });
   };
+  const signPicked = () => signRows([...picked], undefined, true);
   // ----- Staff: one tap in a signature cell -----
   const fillStudent = (r: SheetRow) => run(() => fillStudentSignatureAction(key(r.date)));
-  const fillStaff = (r: SheetRow) => {
+  const fillStaff = (r: SheetRow) => signRows([key(r.date)]);
+  const onHand = (v: InkValue) => {
+    const target = handFor;
+    setHandFor(null);
+    if (!v || !target) return;
+    if (target.who === "staff") return signRows(target.keys, v.png, target.fromSelection);
     const fd = new FormData();
-    fd.set("rows", JSON.stringify([key(r.date)]));
-    run(async () => { const res = await signRowsAction({}, fd); if (res.ok) setPicked((x) => { const n = new Set(x); n.delete(key(r.date)); return n; }); return res; });
+    fd.set("signature", v.png);
+    run(() => studentSignRowAction(target.date, {}, fd));
   };
   const toggle = (k: string) => setPicked((s) => { const n = new Set(s); if (n.has(k)) n.delete(k); else n.add(k); return n; });
 
@@ -132,10 +157,11 @@ export function PaperSheet(p: Props) {
           studentSig={p.studentSignatureId ? p.images[p.studentSignatureId] ?? null : null}
           staffSig={p.staffSignatureId ? p.images[p.staffSignatureId] ?? null : null}
           pending={pending}
-          studentFillable={p.rows.filter((r) => !r.isFuture && missingStudent(r)).map((r) => key(r.date))}
+          studentFillable={p.rows.filter((r) => canChange(r) && missingStudent(r)).map((r) => key(r.date))}
           staffFillable={p.rows.filter(signable).map((r) => key(r.date))}
-          studentOutdated={p.studentSignatureId ? p.rows.filter((r) => !isHoliday(r) && r.entry?.studentSignature && r.entry.studentSignature.id !== p.studentSignatureId).map((r) => key(r.date)) : []}
-          staffOutdated={p.staffSignatureId ? p.rows.filter((r) => !isHoliday(r) && r.entry?.staffSignature && r.entry.staffSignature.id !== p.staffSignatureId).map((r) => key(r.date)) : []}
+          studentOutdated={p.studentSignatureId ? p.rows.filter((r) => !locked(r) && !isHoliday(r) && r.entry?.studentSignature && r.entry.studentSignature.id !== p.studentSignatureId).map((r) => key(r.date)) : []}
+          // Only your own older signature is updated, and only on open rows: others' signatures (and history) stay.
+          staffOutdated={p.staffSignatureId ? p.rows.filter((r) => !locked(r) && !isHoliday(r) && r.entry?.staffSignature && r.entry.staffSignature.staffId === p.staffId && r.entry.staffSignature.id !== p.staffSignatureId).map((r) => key(r.date)) : []}
           run={run}
         />
       )}
@@ -175,7 +201,15 @@ export function PaperSheet(p: Props) {
                     </td>
                     <td className="date">
                       {usDate(r.date)}
-                      {staff && !r.isFuture && <><br /><button className="edit no-print" onClick={() => setEditing(r)}>Edit</button></>}
+                      {staff && !r.isFuture && (canChange(r)
+                        ? <><br /><button className="edit no-print" onClick={() => setEditing(r)}>{locked(r) ? "Edit (locked)" : "Edit"}</button></>
+                        : <><br /><span className="lock no-print" title={`Older than ${p.editWindowDays} days: only an admin can change it`}>Locked</span></>)}
+                      {staff && e && (canChange(r) || (e.comments?.length ?? 0) > 0) && (
+                        <><br /><button className="cmt no-print" onClick={() => setCommentsFor(r)} aria-label={`Comments for ${usDate(r.date)}`}>
+                          {(e.comments?.length ?? 0) ? `Comments (${e.comments!.length})` : "+ Comment"}
+                        </button></>
+                      )}
+                      {!staff && (e?.comments?.length ?? 0) > 0 && <><br /><a className="cmt no-print" href="#comments">Note{e!.comments!.length === 1 ? "" : "s"} ({e!.comments!.length})</a></>}
                     </td>
                     {isHoliday(r) ? (
                       // Holiday: one open cell to the end of the row, no column lines.
@@ -192,17 +226,23 @@ export function PaperSheet(p: Props) {
                     {!isHoliday(r) && <>
                     <td>
                       {e?.studentSignature && p.images[e.studentSignature.id] && <img className="sig" src={p.images[e.studentSignature.id]} alt={`Student signature, ${usDate(r.date)}`} />}
-                      {staff && !r.isFuture && missingStudent(r) && (p.studentHasSignature
+                      {studentCanSign(r) && (
+                        <button className="fill go no-print" disabled={pending} onClick={() => setHandFor({ who: "student", date: r.date })}>Sign</button>
+                      )}
+                      {canChange(r) && missingStudent(r) && (p.studentHasSignature
                         ? <button className="fill no-print" disabled={pending} onClick={() => fillStudent(r)} aria-label={`Fill student signature, ${usDate(r.date)}`}>Fill with signature</button>
                         : <a className="small no-print" href="#signatures">No signature on file</a>)}
-                      {staff && e?.studentSignature && p.studentSignatureId && e.studentSignature.id !== p.studentSignatureId && (
+                      {staff && !locked(r) && e?.studentSignature && p.studentSignatureId && e.studentSignature.id !== p.studentSignatureId && (
                         <button className="edit no-print" disabled={pending} onClick={() => run(() => replaceRowSignatureAction(k, "student"))}>Use new signature</button>
                       )}
                     </td>
                     <td>
                       {e?.staffSignature && p.images[e.staffSignature.id] && <img className="sig" src={p.images[e.staffSignature.id]} alt={`Signed by ${e.staffSignature.staffName}`} title={e.staffSignature.staffName} />}
-                      {staff && signable(r) && p.hasSavedSignature && (
+                      {signable(r) && p.hasSavedSignature && (
                         <button className="fill no-print" disabled={pending} onClick={() => fillStaff(r)} aria-label={`Fill staff signature, ${usDate(r.date)}`}>Fill with my signature</button>
+                      )}
+                      {signable(r) && (
+                        <button className="edit no-print" style={{ display: "block", margin: "3px auto 0" }} disabled={pending} onClick={() => setHandFor({ who: "staff", keys: [k], fromSelection: false })} aria-label={`Sign by hand, ${usDate(r.date)}`}>Sign by hand</button>
                       )}
                     </td>
                     </>}
@@ -218,22 +258,35 @@ export function PaperSheet(p: Props) {
               <tr>
                 <td style={{ width: "34%" }}><b>Approved by</b><br />STAFF NAME/POSITION:<br /><span className="hand">{p.approval ? `${p.approval.staffName}${p.approval.position ? `/${p.approval.position}` : ""}`.toUpperCase() : ""}</span></td>
                 <td style={{ width: "28%" }}>STAFF SIGNATURE:<br />{p.approval && p.images[p.approval.signatureId] && <img className="sig" src={p.images[p.approval.signatureId]} alt={`Signature of ${p.approval.staffName}`} />}</td>
-                <td>COMMENTS:<br /><span className="hand" style={{ whiteSpace: "normal", fontSize: 20 }}>{p.approval?.comments}</span></td>
+                <td>COMMENTS:<br /><span className="hand" style={{ whiteSpace: "normal", fontSize: 20 }}>{p.approval?.comments}</span>
+                  {p.approval?.commentsInkId && p.images[p.approval.commentsInkId] && <img className="ink-note" src={p.images[p.approval.commentsInkId]} alt="Handwritten comments" />}</td>
               </tr>
             </tbody>
           </table>
           {p.approval && !p.approvalCurrent && <p className="msg info no-print">A row changed after this month was approved. It needs approving again.</p>}
+          <MonthComments rows={p.rows} images={p.images} />
         </article>
       </div>
 
-      {staff && <ApproveForm studentId={s._id} month={p.month} hasSaved={!!p.hasSavedSignature} approved={!!p.approval && p.approvalCurrent} />}
+      {staff && (
+        <ApproveForm
+          studentId={s._id} month={p.month} hasSaved={!!p.hasSavedSignature} approved={!!p.approval && p.approvalCurrent}
+          approvedByOther={!!p.approval && p.approval.staffId !== p.staffId && !p.isAdmin ? p.approval.staffName : null}
+        />
+      )}
+      {!staff && todayRow?.entry && !todayRow.holiday && (
+        <section className="panel no-print" style={{ maxWidth: 980, margin: "16px auto" }}>
+          <h2 style={{ marginTop: 0 }}>Add a note to today</h2>
+          <p className="small muted">For example why you were late or left early. Type it, write it by hand, or both. Staff see it on your sheet.</p>
+          <CommentForm onSubmit={(fd) => studentCommentAction({}, fd)} onSaved={() => router.refresh()} />
+        </section>
+      )}
 
       {staff && picked.size > 0 && (
         <div className="sticky no-print">
           <strong>{picked.size} row{picked.size === 1 ? "" : "s"} selected</strong>
-          {p.hasSavedSignature
-            ? <button className="btn" disabled={pending} onClick={signPicked}>Sign {picked.size} with my signature</button>
-            : <a className="btn" href="/staff/account">Put your signature on file first</a>}
+          {p.hasSavedSignature && <button className="btn" disabled={pending} onClick={signPicked}>Sign {picked.size} with my signature</button>}
+          <button className={p.hasSavedSignature ? "btn ghost" : "btn"} disabled={pending} onClick={() => setHandFor({ who: "staff", keys: [...picked], fromSelection: true })}>Sign {picked.size} by hand</button>
           {offerStudent && p.hasSavedSignature && (p.studentHasSignature ? (
             <label className="small" title="Uses the student's signature on file.">
               <input type="checkbox" className="chk" checked={withStudent} onChange={(e) => setWithStudent(e.target.checked)} />{" "}
@@ -257,35 +310,145 @@ export function PaperSheet(p: Props) {
           onDone={(r) => { setTyping(null); setMsg(r); router.refresh(); }}
         />
       )}
-      {editing && <EditRow studentId={s._id} row={editing} onClose={() => { setEditing(null); router.refresh(); }} />}
+      {editing && <EditRow studentId={s._id} row={editing} locked={locked(editing)} onClose={() => { setEditing(null); router.refresh(); }} />}
+      {commentsFor && (
+        <CommentsDialog
+          row={commentsFor} images={p.images} canAdd={canChange(commentsFor)}
+          onSubmit={(fd) => addCommentAction(key(commentsFor.date), {}, fd)}
+          onClose={() => { setCommentsFor(null); router.refresh(); }}
+        />
+      )}
+      {handFor && (
+        <InkPad
+          kind="signature"
+          title={handFor.who === "student" ? `Sign for ${usDate(handFor.date)}` : `Sign ${handFor.keys.length} row${handFor.keys.length === 1 ? "" : "s"} as ${p.staffName ?? "staff"}`}
+          hint={handFor.who === "staff" ? "Your signature validates the attendance on these rows." : "Use your finger, a stylus or the mouse."}
+          onCancel={() => setHandFor(null)}
+          onDone={onHand}
+          doneLabel={handFor.who === "staff" ? "Sign" : "Use this signature"}
+        />
+      )}
     </>
   );
 }
 
-function ApproveForm({ studentId, month, hasSaved, approved }: { studentId: string; month: string; hasSaved: boolean; approved: boolean }) {
+function ApproveForm({ studentId, month, hasSaved, approved, approvedByOther }: { studentId: string; month: string; hasSaved: boolean; approved: boolean; approvedByOther: string | null }) {
   const router = useRouter();
   const comments = useRef<HTMLTextAreaElement>(null);
   const [msg, setMsg] = useState<ActionState>({});
   const [pending, start] = useTransition();
+  const [how, setHow] = useState<"file" | "hand">(hasSaved ? "file" : "hand");
+  const [sig, setSig] = useState<InkValue>(null);
+  const [ink, setInk] = useState<InkValue>(null);
   const send = () => start(async () => {
     const fd = new FormData();
     fd.set("comments", comments.current?.value ?? "");
-    setMsg(await approveMonthAction(studentId, month, {}, fd));
+    if (how === "hand") { if (!sig) { setMsg({ error: "Sign in the box first." }); return; } fd.set("signature", sig.png); }
+    if (ink) fd.set("commentsInk", ink.png);
+    const r = await approveMonthAction(studentId, month, {}, fd);
+    setMsg(r);
+    if (r.ok) { setSig(null); setInk(null); }
     router.refresh();
   });
+  if (approvedByOther) {
+    return (
+      <section className="panel no-print" style={{ maxWidth: 980, margin: "16px auto" }}>
+        <h2 style={{ marginTop: 0 }}>Approved by {approvedByOther}</h2>
+        <p className="small muted">Their approval and signature are kept. Only an admin can replace them.</p>
+      </section>
+    );
+  }
   return (
     <section className="panel no-print" style={{ maxWidth: 980, margin: "16px auto" }}>
       <h2 style={{ marginTop: 0 }}>{approved ? "Approved" : "Approve this month"}</h2>
-      <div className="field"><label htmlFor="cmt">Comments (optional)</label><textarea id="cmt" ref={comments} rows={2} /></div>
-      {hasSaved
-        ? <button className="btn" disabled={pending} onClick={send}>{approved ? "Approve again" : "Approve"} with my signature</button>
-        : <a className="btn" href="/staff/account">Put your signature on file first</a>}
+      <div className="field"><label htmlFor="cmt">Comments (optional)</label><textarea id="cmt" ref={comments} rows={2} maxLength={600} /></div>
+      <InkField kind="note" label="Handwritten comments (optional)" title="Write your comments" value={ink} onChange={setInk} compact />
+      <fieldset className="field" style={{ border: 0, padding: 0 }}>
+        <legend style={{ fontWeight: 700, fontSize: 15, marginBottom: 6 }}>Signature</legend>
+        <div className="row">
+          {hasSaved && <label><input type="radio" name="how" checked={how === "file"} onChange={() => setHow("file")} /> My signature on file</label>}
+          <label><input type="radio" name="how" checked={how === "hand"} onChange={() => setHow("hand")} /> Sign by hand now</label>
+        </div>
+      </fieldset>
+      {how === "hand" && <InkField kind="signature" label="Your signature" title="Sign to approve this month" value={sig} onChange={setSig} />}
+      <button className="btn" disabled={pending || (how === "hand" && !sig)} onClick={send}>{pending ? "Approving…" : `${approved ? "Approve again" : "Approve"} with my signature`}</button>
       <Msg state={msg} />
     </section>
   );
 }
 
-function EditRow({ studentId, row, onClose }: { studentId: string; row: SheetRow; onClose: () => void }) {
+/** Comments under the sheet (also printed): every comment on this month's rows, oldest first. */
+function MonthComments({ rows, images }: { rows: SheetRow[]; images: Record<string, string> }) {
+  const all = rows.flatMap((r) => (r.entry?.comments ?? []).map((c) => ({ ...c, date: r.date })));
+  if (!all.length) return null;
+  all.sort((a, b) => a.date.localeCompare(b.date) || new Date(a.at).getTime() - new Date(b.at).getTime());
+  return (
+    <section className="comments" id="comments" aria-label="Comments">
+      <h3>COMMENTS</h3>
+      <ul>
+        {all.map((c) => (
+          <li key={c.id}>
+            <b>{usDate(c.date)}</b> – {c.byName}{c.byRole === "STUDENT" ? " (student)" : ""}: {c.text}
+            {c.inkId && images[c.inkId] && <img className="ink-note" src={images[c.inkId]} alt={`Handwritten comment by ${c.byName}`} />}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+/** Type a comment, write it by hand, or both. */
+function CommentForm({ onSubmit, onSaved }: { onSubmit: (fd: FormData) => Promise<ActionState>; onSaved?: () => void }) {
+  const [text, setText] = useState("");
+  const [ink, setInk] = useState<InkValue>(null);
+  const [msg, setMsg] = useState<ActionState>({});
+  const [pending, start] = useTransition();
+  const send = () => start(async () => {
+    const fd = new FormData();
+    fd.set("text", text);
+    if (ink) fd.set("ink", ink.png);
+    let r: ActionState;
+    try { r = await onSubmit(fd); } catch { r = { error: "Couldn't save. Check the connection and try again." }; }
+    setMsg(r);
+    if (r.ok) { setText(""); setInk(null); onSaved?.(); }
+  });
+  return (
+    <div>
+      <div className="field"><label htmlFor="ctext">Type it</label><textarea id="ctext" rows={2} maxLength={500} value={text} onChange={(e) => setText(e.target.value)} /></div>
+      <InkField kind="note" label="Or write it by hand" title="Write your note" value={ink} onChange={setInk} compact />
+      <button type="button" className="btn" disabled={pending || (!text.trim() && !ink)} onClick={send}>{pending ? "Saving…" : "Add note"}</button>
+      <Msg state={msg} />
+    </div>
+  );
+}
+
+function CommentsDialog({ row, images, canAdd, onSubmit, onClose }: {
+  row: SheetRow; images: Record<string, string>; canAdd: boolean; onSubmit: (fd: FormData) => Promise<ActionState>; onClose: () => void;
+}) {
+  const list = row.entry?.comments ?? [];
+  return (
+    <div className="sigmodal" role="dialog" aria-modal="true" aria-label={`Comments, ${usDate(row.date)}`} onKeyDown={(e) => { if (e.key === "Escape" && !document.querySelector(".inkmodal")) onClose(); }}>
+      <div className="panel" style={{ width: "min(560px, 100%)", margin: 0, maxHeight: "100%", overflow: "auto" }}>
+        <h2 style={{ marginTop: 0 }}>Comments · {row.weekdayName}, {usDate(row.date)}</h2>
+        {list.length === 0 ? <p className="muted">No comments yet.</p> : (
+          <ul className="cmtlist">
+            {list.map((c) => (
+              <li key={c.id}>
+                <div className="small muted">{new Date(c.at).toLocaleString("en-US")} · {c.byName}{c.byRole === "STUDENT" ? " (student)" : ""}</div>
+                {c.text && <div>{c.text}</div>}
+                {c.inkId && images[c.inkId] && <img className="ink-note" src={images[c.inkId]} alt={`Handwritten comment by ${c.byName}`} />}
+              </li>
+            ))}
+          </ul>
+        )}
+        {canAdd ? <CommentForm onSubmit={onSubmit} onSaved={onClose} /> : <p className="small muted">This row is locked. Only an admin can add comments to it.</p>}
+        <div className="row" style={{ justifyContent: "flex-end", marginTop: 8 }}><button type="button" className="btn ghost" onClick={onClose}>Close</button></div>
+      </div>
+    </div>
+  );
+}
+
+function EditRow({ studentId, row, locked, onClose }: { studentId: string; row: SheetRow; locked: boolean; onClose: () => void }) {
   const e = row.entry;
   const [state, setState] = useState<ActionState>({});
   const [pending, start] = useTransition();
@@ -303,6 +466,7 @@ function EditRow({ studentId, row, onClose }: { studentId: string; row: SheetRow
     <div className="sigmodal" role="dialog" aria-modal="true" aria-label={`Edit ${usDate(row.date)}`}>
       <form className="panel" style={{ width: "min(520px, 100%)", margin: 0 }} onSubmit={submit}>
         <h2 style={{ marginTop: 0 }}>{row.weekdayName}, {usDate(row.date)}</h2>
+        {locked && <p className="msg info">This row is locked (older than the editing window). As an admin you can still change it; a reason is required and the change is recorded.</p>}
         <div className="field">
           <label htmlFor="st">Status</label>
           <select id="st" name="status" value={status} onChange={(x) => setStatus(x.target.value as typeof status)}>
@@ -316,7 +480,7 @@ function EditRow({ studentId, row, onClose }: { studentId: string; row: SheetRow
           </div>
         )}
         <div className="field"><label htmlFor="nt">Note (optional)</label><input id="nt" name="note" defaultValue={e?.note ?? ""} maxLength={200} /></div>
-        <div className="field"><label htmlFor="rs">Reason for the change {e ? "" : "(optional)"}</label><input id="rs" name="reason" maxLength={200} placeholder="e.g. Forgot to tap End" />{state.fieldErrors?.reason && <span className="err">{state.fieldErrors.reason}</span>}</div>
+        <div className="field"><label htmlFor="rs">Reason for the change {e || locked ? "" : "(optional)"}</label><input id="rs" name="reason" maxLength={200} placeholder="e.g. Forgot to tap End" />{state.fieldErrors?.reason && <span className="err">{state.fieldErrors.reason}</span>}</div>
         <p className="small muted">Saving removes the staff signature on this row, so it gets signed again. The student&apos;s signature stays.</p>
         {e && e.history.length > 0 && (
           <details className="small"><summary>Changes to this row ({e.history.length})</summary>

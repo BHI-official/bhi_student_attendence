@@ -23,6 +23,8 @@ async function main() {
   await idx("students", { nameLower: 1 });
   await idx("students", { active: 1, endDate: 1 });
   await idx("students", { courseName: 1 });
+  // Two active students can never share a PIN (students whose PIN predates this have no pinKey).
+  await idx("students", { pinKey: 1 }, { unique: true, name: "unique_active_pin", partialFilterExpression: { active: true, pinKey: { $type: "string" } } });
   await idx("entries", { studentId: 1, date: 1 });
   await idx("entries", { date: 1 });
   await idx("signatures", { ownerId: 1, createdAt: -1 });
@@ -30,6 +32,8 @@ async function main() {
   await idx("audit_logs", { target: 1, at: -1 });
   await idx("rate_limits", { expiresAt: 1 }, { expireAfterSeconds: 0 });
   console.log("Indexes ready.");
+  const oldPins = await db.collection("students").countDocuments({ active: true, pinKey: { $not: { $type: "string" } } });
+  if (oldPins) console.log(`${oldPins} active student(s) have a PIN from before PINs were unique. Give them a new PIN (student profile → PIN) to be sure it's theirs alone.`);
 
   const staff = db.collection("staff");
   if (await staff.countDocuments({ role: "ADMIN", active: true })) {

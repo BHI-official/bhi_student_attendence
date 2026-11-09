@@ -4,13 +4,14 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
-import { audit, cols, rateLimit, type Entry, type EntryStatus } from "@/lib/db";
+import { audit, cols, newId, rateLimit, type Entry, type EntryStatus, type RowComment } from "@/lib/db";
 import { endStaffSession, requireStaff, startStaffSession } from "@/lib/auth";
 import { holidaysBetween, thisMonth, today } from "@/lib/data";
-import { DATE_RE, MONTH_RE, TIME_RE, isClassDay, minutesBetween, time12, usDate } from "@/lib/sheet";
+import { DATE_RE, MONTH_RE, TIME_RE, addDays, isClassDay, minutesBetween, time12, usDate } from "@/lib/sheet";
 import { entriesHash } from "@/lib/hash";
 import { canSee } from "@/lib/access";
-import { checkSignaturePng, saveSignature } from "@/lib/signatures";
+import { checkNotePng, checkSignaturePng, saveSignature } from "@/lib/signatures";
+import { editWindowDays, isLocked, lockedFor } from "@/lib/policy";
 import type { ActionState } from "@/lib/action";
 
 const refresh = () => { revalidatePath("/staff", "layout"); revalidatePath("/student", "layout"); };
@@ -36,7 +37,7 @@ export async function staffLogoutAction() {
  * A row can be signed by staff once the day is decided: times complete, or absent / excused.
  * Holidays (on the holiday list, or a row marked Holiday) are never signed.
  */
-const NO_SIG = "Put your signature on file first (My account), then sign with one tap.";
+const NO_SIG = "Sign by hand, or put your signature on file (My account) to sign with one tap.";
 const isHolidayRow = (e: Entry | null, holiday: boolean) => holiday || e?.status === "HOLIDAY";
 const signable = (e: Entry | null, holiday: boolean) =>
   !isHolidayRow(e, holiday) && !!e && (e.status !== "PRESENT" || (!!e.startTime && !!e.endTime));
@@ -56,19 +57,26 @@ export async function signRowsAction(_: ActionState, fd: FormData): Promise<Acti
   const staff = await requireStaff();
   const keys = z.array(z.string().regex(/^[0-9a-f-]{36}:\d{4}-\d{2}-\d{2}$/)).max(1000).safeParse(JSON.parse(String(fd.get("rows") ?? "[]")));
   if (!keys.success || !keys.data.length) return { error: "Choose the rows to sign." };
-  if (!staff.signatureId) return { error: NO_SIG };
+  // Signed by hand just now, or with the signature on file.
+  const rawHand = String(fd.get("signature") ?? "");
+  const hand = rawHand ? checkSignaturePng(rawHand) : null;
+  if (hand && "error" in hand) return { error: hand.error };
+  if (!hand && !staff.signatureId) return { error: NO_SIG };
   const wantsStudentSig = fd.get("withStudentSignature") === "1";
   const { entries, students } = await cols();
   const dates = keys.data.map((k) => k.slice(37));
   const holidays = await holidaysBetween(dates.reduce((a, b) => (a < b ? a : b)), dates.reduce((a, b) => (a > b ? a : b)));
   const now = new Date();
-  const sig = { id: staff.signatureId, at: now, staffId: staff._id, staffName: staff.name };
+  const sigId = hand ? await saveSignature("STAFF", staff._id, hand.png, "DRAWN", staff._id) : staff.signatureId!;
+  const sig = { id: sigId, at: now, staffId: staff._id, staffName: staff.name };
+  let locked = 0;
   let signed = 0, studentSigned = 0, holidaysSkipped = 0;
   const skipped: string[] = [];
   const noStudentSig: string[] = [];
   for (const key of new Set(keys.data)) {
     const [studentId, date] = [key.slice(0, 36), key.slice(37)];
     if (date > today()) { skipped.push(`${usDate(date)} is in the future`); continue; }
+    if (lockedFor(staff, date)) { locked++; continue; }
     const student = await students.findOne({ _id: studentId });
     if (!student || !canSee(staff, student)) { skipped.push(`${usDate(date)}: not one of your students`); continue; }
     if (!isClassDay(student, date)) { skipped.push(`${student.name} ${usDate(date)}: not a class day`); continue; }
@@ -98,7 +106,7 @@ export async function signRowsAction(_: ActionState, fd: FormData): Promise<Acti
     const res = await entries.updateOne({ _id: key, staffSignature: null }, { $set: { staffSignature: sig, updatedAt: now } });
     if (res.modifiedCount) signed++;
   }
-  await audit(staff._id, "staff.sign_rows", "entries", { signed, studentSigned, skipped: skipped.length, holidaysSkipped });
+  await audit(staff._id, "staff.sign_rows", "entries", { signed, studentSigned, skipped: skipped.length, holidaysSkipped, locked, handwritten: !!hand, signatureId: sigId });
   refresh();
   const list = (xs: string[]) => `${xs.slice(0, 5).join("; ")}${xs.length > 5 ? ` and ${xs.length - 5} more` : ""}`;
   const names = [...new Set(noStudentSig)];
@@ -106,6 +114,7 @@ export async function signRowsAction(_: ActionState, fd: FormData): Promise<Acti
     (studentSigned ? ` Added the student's signature to ${studentSigned} of them.` : "") +
     (names.length ? ` No signature on file for ${list(names)}, so their row${noStudentSig.length === 1 ? " has" : "s have"} no student signature yet.` : "") +
     (holidaysSkipped ? ` Holidays are left unsigned (${holidaysSkipped}).` : "") +
+    (locked ? ` ${locked} row${locked === 1 ? " is" : "s are"} older than ${editWindowDays()} days and locked: ask an admin.` : "") +
     (skipped.length ? ` Not signed: ${list(skipped)}.` : "");
   return signed ? { ok: true, message: `Signed ${signed} row${signed === 1 ? "" : "s"}.${extra}` } : { error: `Nothing was signed.${extra}` };
 }
@@ -121,6 +130,8 @@ async function addStudentSignature(staff: StaffDoc, rowKey: string): Promise<{ o
   if (!ROW_KEY.test(rowKey)) return { ok: false, message: "Invalid row." };
   const [studentId, date] = [rowKey.slice(0, 36), rowKey.slice(37)];
   if (date > today()) return { ok: false, message: `${usDate(date)} is in the future.` };
+  const lock = lockedFor(staff, date);
+  if (lock) return { ok: false, message: lock };
   const { entries, students } = await cols();
   const student = await students.findOne({ _id: studentId });
   if (!student || !canSee(staff, student)) return { ok: false, message: "That student isn't in your courses." };
@@ -178,6 +189,9 @@ export async function replaceRowSignatureAction(rowKey: string, which: "student"
   const { entries, students } = await cols();
   const student = await students.findOne({ _id: studentId });
   if (!student || !canSee(staff, student)) return { error: "That student isn't in your courses." };
+  // Signatures on locked rows are history: they are never swapped, by anyone. To change such a row
+  // an admin edits it (with a reason), which is recorded.
+  if (isLocked(date)) return { error: `${usDate(date)} is locked, so its signatures are kept as they are. An admin can edit the row if it's wrong.` };
   const e = await entries.findOne({ _id: rowKey });
   const now = new Date();
   if (which === "student") {
@@ -196,6 +210,8 @@ export async function replaceRowSignatureAction(rowKey: string, which: "student"
   } else {
     if (!staff.signatureId) return { error: NO_SIG };
     if (!e?.staffSignature) return { error: "This row isn't signed by staff yet. Use Fill with my signature." };
+    // Only your own older signature is updated. Someone else's validation stays theirs.
+    if (e.staffSignature.staffId !== staff._id) return { error: `This row was signed by ${e.staffSignature.staffName}. Their signature is kept.` };
     if (e.staffSignature.id === staff.signatureId) return { ok: true, message: "This row already has your current signature." };
     const res = await entries.updateOne(
       { _id: rowKey, "staffSignature.id": e.staffSignature.id },
@@ -234,18 +250,21 @@ export async function editRowAction(studentId: string, date: string, _: ActionSt
       if (minutes === null) return { fieldErrors: { endTime: "End must be after start" } };
     }
   }
+  const lock = lockedFor(staff, date);
+  if (lock) return { error: lock };
   const { entries, students } = await cols();
   const student = await students.findOne({ _id: studentId });
   if (!student || !canSee(staff, student)) return { error: "That student isn't in your courses." };
   if (!isClassDay(student, date)) return { error: "That isn't one of this student's class days." };
   const id = `${studentId}:${date}`;
+  const lockedRow = isLocked(date);
   const before = await entries.findOne({ _id: id });
   const present = status.data === "PRESENT";
   const after = { status: status.data, startTime: present ? startTime : null, endTime: present ? endTime : null, minutes, note };
   const changed = !before || before.status !== after.status || before.startTime !== after.startTime || before.endTime !== after.endTime || (before.note ?? "") !== note;
   if (!changed) return { ok: true, message: "Nothing changed." };
   const hadValues = !!before && (!!before.startTime || before.status !== "PRESENT" || !!before.staffSignature);
-  if (hadValues && reason.length < 3) return { fieldErrors: { reason: "Say why you're changing this row" } };
+  if ((hadValues || lockedRow) && reason.length < 3) return { fieldErrors: { reason: lockedRow ? "This row is locked. Say why you're changing it" : "Say why you're changing this row" } };
   const now = new Date();
   const what = `${before ? `${before.status} ${time12(before.startTime)}-${time12(before.endTime)}` : "empty"} → ${after.status} ${time12(after.startTime)}-${time12(after.endTime)}`;
   await entries.updateOne(
@@ -257,12 +276,14 @@ export async function editRowAction(studentId: string, date: string, _: ActionSt
         ...(before?.startTime !== after.startTime ? { startLateBy: null } : {}),
         ...(before?.endTime !== after.endTime ? { endLateBy: null } : {}),
       },
-      $setOnInsert: { studentId, date, startAt: null, endAt: null, studentSignature: null },
+      $setOnInsert: { studentId, date, startAt: null, endAt: null, studentSignature: null, comments: [] },
       $push: { history: { at: now, byId: staff._id, byName: staff.name, what, reason: reason || "filled in by staff" } },
     },
     { upsert: true },
   );
-  await audit(staff._id, "staff.edit_row", id, { before: before ? { status: before.status, startTime: before.startTime, endTime: before.endTime } : null, after, reason });
+  await audit(staff._id, lockedRow ? "admin.edit_locked_row" : "staff.edit_row", id, {
+    before: before ? { status: before.status, startTime: before.startTime, endTime: before.endTime, staffSignature: before.staffSignature ?? null } : null, after, reason,
+  });
   refresh();
   return { ok: true, message: `${student.name}, ${usDate(date)} saved. Sign the row again.` };
 }
@@ -271,6 +292,8 @@ export async function editRowAction(studentId: string, date: string, _: ActionSt
 export async function markAbsentAction(date: string, _: ActionState, fd: FormData): Promise<ActionState> {
   const staff = await requireStaff();
   if (!DATE_RE.test(date) || date > today()) return { error: "Invalid date." };
+  const lock = lockedFor(staff, date);
+  if (lock) return { error: lock };
   if ((await holidaysBetween(date, date)).get(date)) return { error: "That date is a holiday." };
   const ids = z.array(z.string().uuid()).max(1000).safeParse(JSON.parse(String(fd.get("students") ?? "[]")));
   if (!ids.success || !ids.data.length) return { error: "No students to mark." };
@@ -284,7 +307,7 @@ export async function markAbsentAction(date: string, _: ActionState, fd: FormDat
       {
         $setOnInsert: {
           studentId: s._id, date, status: "ABSENT" as EntryStatus, startAt: null, endAt: null, startTime: null, endTime: null, minutes: null,
-          studentSignature: null, staffSignature: null, note: "", updatedAt: now,
+          studentSignature: null, staffSignature: null, note: "", updatedAt: now, comments: [],
           history: [{ at: now, byId: staff._id, byName: staff.name, what: "marked absent", reason: "no start time" }],
         },
       },
@@ -297,26 +320,144 @@ export async function markAbsentAction(date: string, _: ActionState, fd: FormDat
   return { ok: true, message: `${marked} student${marked === 1 ? "" : "s"} marked absent.` };
 }
 
-/** The "Approved by" block: staff name, position, signature and comments for the month. */
+/**
+ * The "Approved by" block: staff name, position, signature (on file, or signed by hand now) and
+ * comments (typed and/or handwritten) for the month. An approval made by someone else (for example
+ * historical approvals) can only be replaced by an admin.
+ */
 export async function approveMonthAction(studentId: string, month: string, _: ActionState, fd: FormData): Promise<ActionState> {
   const staff = await requireStaff();
   if (!z.string().uuid().safeParse(studentId).success || !MONTH_RE.test(month) || month > thisMonth()) return { error: "Invalid month." };
-  if (!staff.signatureId) return { error: NO_SIG };
+  const rawHand = String(fd.get("signature") ?? "");
+  const hand = rawHand ? checkSignaturePng(rawHand) : null;
+  if (hand && "error" in hand) return { error: hand.error };
+  if (!hand && !staff.signatureId) return { error: NO_SIG };
+  const rawInk = String(fd.get("commentsInk") ?? "");
+  const ink = rawInk ? checkNotePng(rawInk) : null;
+  if (ink && "error" in ink) return { error: ink.error };
   const student = await (await cols()).students.findOne({ _id: studentId });
   if (!student || !canSee(staff, student)) return { error: "That student isn't in your courses." };
   const comments = String(fd.get("comments") ?? "").trim().slice(0, 600);
   const { entries, approvals } = await cols();
   const list = await entries.find({ studentId, date: { $gte: `${month}-01`, $lte: `${month}-31` } }).toArray();
   if (!list.length) return { error: "There is nothing to approve for this month yet." };
+  const existing = await approvals.findOne({ _id: `${studentId}:${month}` });
+  if (existing && existing.staffId !== staff._id && staff.role !== "ADMIN") {
+    return { error: `This month was approved by ${existing.staffName}. Only an admin can replace their approval.` };
+  }
+  const signatureId = hand ? await saveSignature("STAFF", staff._id, hand.png, "DRAWN", staff._id) : staff.signatureId!;
+  const commentsInkId = ink ? await saveSignature("STAFF", staff._id, ink.png, "DRAWN", staff._id, "NOTE") : null;
   const now = new Date();
-  await approvals.updateOne(
-    { _id: `${studentId}:${month}` },
-    { $set: { studentId, month, staffId: staff._id, staffName: staff.name, position: staff.position, signatureId: staff.signatureId, comments, entriesHash: entriesHash(list), signedAt: now } },
-    { upsert: true },
+  // Only replace the approval we looked at, so two people approving at once can't overwrite each other unseen.
+  const res = await approvals.updateOne(
+    existing ? { _id: existing._id, signedAt: existing.signedAt } : { _id: `${studentId}:${month}` },
+    { $set: { studentId, month, staffId: staff._id, staffName: staff.name, position: staff.position, signatureId, comments, commentsInkId, entriesHash: entriesHash(list), signedAt: now } },
+    { upsert: !existing },
   );
-  await audit(staff._id, "staff.approve_month", `${studentId}:${month}`, { rows: list.length });
+  if (existing && !res.matchedCount) return { error: "Someone else approved this month just now. Reload the page." };
+  await audit(staff._id, "staff.approve_month", `${studentId}:${month}`, {
+    rows: list.length, handwritten: !!hand, handwrittenComments: !!commentsInkId,
+    replaced: existing ? { staffId: existing.staffId, staffName: existing.staffName, signatureId: existing.signatureId, signedAt: existing.signedAt } : null,
+  });
   refresh();
   return { ok: true, message: "Month approved." };
+}
+
+/**
+ * A comment on one row (typed, handwritten, or both). Comments are added to the row, never edited,
+ * and don't touch its times or signatures. Teachers can comment while the row is open; admins any time.
+ */
+export async function addCommentAction(rowKey: string, _: ActionState, fd: FormData): Promise<ActionState> {
+  const staff = await requireStaff();
+  if (!ROW_KEY.test(rowKey)) return { error: "Invalid row." };
+  const [studentId, date] = [rowKey.slice(0, 36), rowKey.slice(37)];
+  const lock = lockedFor(staff, date);
+  if (lock) return { error: lock };
+  const text = String(fd.get("text") ?? "").trim().slice(0, 500);
+  const rawInk = String(fd.get("ink") ?? "");
+  const ink = rawInk ? checkNotePng(rawInk) : null;
+  if (ink && "error" in ink) return { error: ink.error };
+  if (!text && !ink) return { error: "Type or write a comment first." };
+  const { entries, students } = await cols();
+  const student = await students.findOne({ _id: studentId });
+  if (!student || !canSee(staff, student)) return { error: "That student isn't in your courses." };
+  const e = await entries.findOne({ _id: rowKey }, { projection: { comments: 1 } });
+  if (!e) return { error: "Nothing is recorded for this day yet. Use Edit to record it, then add a comment." };
+  if ((e.comments?.length ?? 0) >= 50) return { error: "This row has too many comments." };
+  const inkId = ink ? await saveSignature("STAFF", staff._id, ink.png, "DRAWN", staff._id, "NOTE") : null;
+  const c: RowComment = { id: newId(), at: new Date(), byId: staff._id, byName: staff.name, byRole: staff.role, text, inkId };
+  await entries.updateOne({ _id: rowKey }, { $push: { comments: c } });
+  await audit(staff._id, "staff.comment", rowKey, { commentId: c.id, handwritten: !!inkId });
+  refresh();
+  return { ok: true, message: `Comment added to ${usDate(date)}.` };
+}
+
+/**
+ * A day off for one class (a course): every student of the course with class that day gets the day
+ * marked Holiday (or Excused) with a note. Days a student has already started are left alone.
+ * "Remove" takes the mark off again where nothing else was recorded. Teachers: their own courses,
+ * and not on locked days. Future days are allowed (up to a year ahead) so a closure can be planned.
+ */
+export async function markCourseDayAction(_: ActionState, fd: FormData): Promise<ActionState> {
+  const staff = await requireStaff();
+  const date = String(fd.get("date") ?? "");
+  const course = String(fd.get("course") ?? "").trim();
+  const mode = z.enum(["HOLIDAY", "EXCUSED", "REMOVE"]).safeParse(fd.get("status"));
+  const note = String(fd.get("note") ?? "").trim().slice(0, 120);
+  if (!DATE_RE.test(date)) return { fieldErrors: { date: "Choose a date" } };
+  if (date > addDays(today(), 366)) return { fieldErrors: { date: "Choose a date within the next year" } };
+  if (!course) return { fieldErrors: { course: "Choose a class" } };
+  if (!mode.success) return { fieldErrors: { status: "Choose what to mark" } };
+  if (mode.data !== "REMOVE" && note.length < 2) return { fieldErrors: { note: "Add a short note (it's written on the sheet)" } };
+  if (staff.role !== "ADMIN" && !staff.courses.includes(course)) return { error: "That class isn't one of yours." };
+  const lock = lockedFor(staff, date);
+  if (lock) return { error: lock };
+  if ((await holidaysBetween(date, date)).get(date)) return { error: "That date is already a school-wide holiday." };
+  const { entries, students } = await cols();
+  const list = (await students.find({ courseName: course, active: true, startDate: { $lte: date }, endDate: { $gte: date } }).toArray()).filter((s) => isClassDay(s, date));
+  if (!list.length) return { error: `Nobody in ${course} has class on ${usDate(date)}.` };
+  const now = new Date();
+  let changed = 0;
+  const kept: string[] = [];
+  for (const st of list) {
+    const id = `${st._id}:${date}`;
+    if (mode.data === "REMOVE") {
+      // Only rows this tool made (every change in their history is a class day off) and nothing else recorded.
+      const gone = await entries.findOneAndDelete({
+        _id: id, status: { $in: ["HOLIDAY", "EXCUSED"] }, startTime: null, staffSignature: null, studentSignature: null,
+        "comments.0": { $exists: false }, history: { $not: { $elemMatch: { reason: { $ne: "class day off" } } } },
+      });
+      if (gone) { changed++; await audit(staff._id, "staff.course_day_removed", id, { removed: gone }); }
+      continue;
+    }
+    const status = mode.data as EntryStatus;
+    const history = { at: now, byId: staff._id, byName: staff.name, what: `class marked ${status.toLowerCase()}: ${note}`, reason: "class day off" };
+    const res = await entries.updateOne(
+      { _id: id },
+      {
+        $setOnInsert: {
+          studentId: st._id, date, status, note, startAt: null, endAt: null, startTime: null, endTime: null, minutes: null,
+          studentSignature: null, staffSignature: null, comments: [], history: [history], updatedAt: now,
+        },
+      },
+      { upsert: true },
+    );
+    if (res.upsertedCount) { changed++; continue; }
+    // A row exists: change it only if nothing was recorded on it yet.
+    const upd = await entries.updateOne(
+      { _id: id, startTime: null, staffSignature: null },
+      { $set: { status, note, minutes: null, endTime: null, updatedAt: now }, $push: { history } },
+    );
+    if (upd.modifiedCount) changed++; else kept.push(st.name);
+  }
+  await audit(staff._id, "staff.course_day", `${course}:${date}`, { mode: mode.data, note, changed, kept: kept.length });
+  refresh();
+  if (mode.data === "REMOVE") return { ok: true, message: `Removed from ${changed} student${changed === 1 ? "" : "s"}' sheets.` };
+  return {
+    ok: true,
+    message: `${usDate(date)} marked ${mode.data.toLowerCase()} for ${changed} student${changed === 1 ? "" : "s"} in ${course}.` +
+      (kept.length ? ` Left as recorded (already started or signed): ${kept.slice(0, 5).join(", ")}${kept.length > 5 ? "…" : ""}.` : ""),
+  };
 }
 
 /** Staff put their own signature on file (uploaded photo or drawn). A new one replaces it for future rows only. */

@@ -1,0 +1,73 @@
+import re, sys, os
+os.makedirs("/tmp/shots", exist_ok=True)
+from playwright.sync_api import sync_playwright, expect
+B="http://localhost:3100"
+errors=[]
+def draw(page, sel="canvas", pts=None):
+    box=page.locator(sel).last.bounding_box()
+    pts=pts or [(0.15,0.6),(0.3,0.3),(0.45,0.65),(0.6,0.3),(0.8,0.6)]
+    page.mouse.move(box["x"]+box["width"]*pts[0][0], box["y"]+box["height"]*pts[0][1]); page.mouse.down()
+    for x,y in pts[1:]: page.mouse.move(box["x"]+box["width"]*x, box["y"]+box["height"]*y, steps=8)
+    page.mouse.up()
+def step(n): print("✓", n); sys.stdout.flush()
+with sync_playwright() as p:
+    br=p.chromium.launch()
+    ctx=br.new_context(viewport={"width":1180,"height":820}, has_touch=True)
+    page=ctx.new_page()
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.on("console", lambda m: errors.append(m.text) if m.type=="error" else None)
+    # --- Student: name + PIN
+    page.goto(B+"/student"); page.fill("#who","Kev"); page.click("text=Kevin Reid")
+    page.click("button:text-is('1')"); page.click("button:text-is('1')"); page.click("button:text-is('1')"); page.click("button:text-is('1')"); page.click("text=OK")
+    expect(page.locator("text=isn't right").first).to_be_visible(); step("wrong PIN refused")
+    for d in "2468": page.click(f"button:text-is('{d}')")
+    page.click("text=OK"); page.wait_for_url("**/student/sheet"); step("signed in with name + PIN")
+    page.screenshot(path="/tmp/shots/1-student-sheet.png", full_page=True)
+    # --- End of day with handwritten signature
+    page.click("button:has-text('Enter end time')"); page.click("button:has-text('Use the time now')"); page.click("button:text-is('Next')")
+    expect(page.locator("text=Tap to sign").first).to_be_visible()
+    save=page.locator("text=Save end time and signature"); expect(save).to_be_disabled(); step("can't save without signing")
+    page.click("text=Tap to sign"); expect(page.locator(".inkmodal")).to_be_visible()
+    h=page.locator(".inkarea canvas").bounding_box()["height"]; assert h>350, h; step(f"enlarged pad open ({int(h)}px tall)")
+    draw(page,".inkarea canvas"); draw(page,".inkarea canvas",[(0.2,0.75),(0.7,0.72)])
+    page.click("button:text-is('Undo')"); page.click("button:text-is('Redo')"); step("undo / redo")
+    page.screenshot(path="/tmp/shots/2-pad.png")
+    page.click("button:text-is('Clear')"); expect(page.locator("text=Use this signature").first).to_be_disabled(); step("clear")
+    draw(page,".inkarea canvas"); page.click("text=Use this signature")
+    expect(page.locator(".inkbubble.filled img")).to_be_visible(); step("signature shows in the field")
+    page.screenshot(path="/tmp/shots/3-signed-bubble.png")
+    save.click(); expect(page.locator("text=Done for today").first).to_be_visible(); step("end time + handwritten signature saved")
+    # --- Sign an open past day
+    page.locator("button.fill.go:text-is('Sign')").first.click(); draw(page,".inkarea canvas"); page.click("text=Use this signature")
+    expect(page.locator("text=signed.").first).to_be_visible(); step("student signed an open earlier day")
+    # --- Handwritten note
+    page.fill("#ctext","Bus was late"); page.click("text=Tap to write"); draw(page,".inkarea canvas"); page.click("button:text-is('Done')")
+    page.click("button:text-is('Add note')"); expect(page.locator("text=Note added to today").first).to_be_visible(); step("typed + handwritten note")
+    page.screenshot(path="/tmp/shots/4-student-after.png", full_page=True)
+    page.click("text=Done, sign out"); page.wait_for_url("**/student")
+    # --- Teacher
+    page.goto(B+"/staff/login"); page.fill("#f-email","tom@x.test"); page.fill("#f-password","password-123456"); page.click("button:text-is('Sign in')")
+    page.wait_for_url(B+"/staff"); page.screenshot(path="/tmp/shots/5-today.png", full_page=True); step("teacher today board")
+    page.click("a:text-is('Kevin Reid')"); expect(page.locator("h1")).to_have_text("Kevin Reid")
+    expect(page.locator(".level").first).to_be_visible(); page.screenshot(path="/tmp/shots/6-profile.png", full_page=True); step("profile opens from name")
+    page.click("text=Open"); page.wait_for_url("**/staff/sheets/**")
+    page.locator("button:text-is('Sign by hand')").first.click(); draw(page,".inkarea canvas"); page.click(".inkbox button:text-is('Sign')")
+    expect(page.locator("text=/Signed \\d+ row/").first).to_be_visible(); step("teacher validated a row by hand")
+    page.locator("button.cmt").first.click(); page.fill("#ctext","Checked"); page.click("button:text-is('Add note')"); page.wait_for_timeout(800)
+    page.screenshot(path="/tmp/shots/7-staff-sheet.png", full_page=True); step("comment added")
+    page.click("a:has-text('‹')"); page.wait_for_timeout(1000)
+    expect(page.locator(".lock").first).to_be_visible(); step("old row shows Locked for teacher")
+    expect(page.locator("img[alt='Signed by Mahek']")).to_be_visible(); step("Mahek's historical signature shown")
+    assert page.locator("button:text-is('Sign by hand')").count()==0; step("no signing on locked rows for teacher")
+    page.screenshot(path="/tmp/shots/7b-locked.png", full_page=True)
+    page.goto(B+"/staff/reports"); page.screenshot(path="/tmp/shots/8-reports.png", full_page=True)
+    r=page.request.get(B+"/api/reports/class?month="+page.locator("#m").input_value()+"&type=summary"); assert r.ok and r.body()[:4]==b"%PDF"; step("class report PDF downloads")
+    href=page.locator("a:text-is('PDF')").first.get_attribute("href"); r=page.request.get(B+href); assert r.ok and r.body()[:4]==b"%PDF"; step("student sheet PDF downloads")
+    open("/tmp/shots/sheet.pdf","wb").write(r.body())
+    # --- phone-size pad
+    m=br.new_context(viewport={"width":390,"height":760}, has_touch=True, is_mobile=True).new_page()
+    m.goto(B+"/student"); m.fill("#who","Mar"); m.click("text=Maria Lopez")
+    for d in "1357": m.click(f"button:text-is('{d}')")
+    m.click("text=OK"); m.wait_for_url("**/student/sheet"); step("phone sign-in")
+    br.close()
+print("errors:", [e for e in errors if "favicon" not in e])

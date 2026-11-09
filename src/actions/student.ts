@@ -4,12 +4,13 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
-import { audit, cols, isDuplicateKey, rateLimit, type Entry } from "@/lib/db";
+import { audit, cols, isDuplicateKey, newId, rateLimit, type Entry, type RowComment } from "@/lib/db";
 import { currentStudent, endStudentSession, startStudentSession } from "@/lib/auth";
 import { env } from "@/lib/env";
 import { holidaysBetween, schoolMinutes, timeRules } from "@/lib/data";
-import { checkTypedTime, isClassDay, minutesBetween, time12, todayIn } from "@/lib/sheet";
-import { checkSignaturePng, saveSignature } from "@/lib/signatures";
+import { DATE_RE, checkTypedTime, isClassDay, minutesBetween, time12, todayIn, usDate } from "@/lib/sheet";
+import { checkNotePng, checkSignaturePng, saveSignature } from "@/lib/signatures";
+import { isLocked } from "@/lib/policy";
 import type { ActionState } from "@/lib/action";
 
 /** Student taps their name, then enters their PIN. */
@@ -61,7 +62,7 @@ export async function studentStartAction(_: ActionState, fd: FormData): Promise<
   const fresh: Entry = {
     _id: t.id, studentId: t.student._id, date: t.date, status: "PRESENT", startAt: now, endAt: null, startTime, endTime: null, minutes: null,
     startLateBy: checked.lateBy, endLateBy: null,
-    studentSignature: null, staffSignature: null, note: "", history: [], updatedAt: now,
+    studentSignature: null, staffSignature: null, note: "", history: [], comments: [], updatedAt: now,
   };
   try {
     await entries.insertOne(fresh);
@@ -69,7 +70,8 @@ export async function studentStartAction(_: ActionState, fd: FormData): Promise<
     if (!isDuplicateKey(e)) throw e;
     // A row already exists: staff may have marked the day (e.g. absent before the student arrived).
     const res = await entries.updateOne(
-      { _id: t.id, startTime: null, staffSignature: null },
+      // A day staff marked as a holiday for the class stays closed.
+      { _id: t.id, startTime: null, staffSignature: null, status: { $ne: "HOLIDAY" } },
       {
         $set: { status: "PRESENT", startAt: now, startTime, startLateBy: checked.lateBy, updatedAt: now },
         $push: { history: { at: now, byId: t.student._id, byName: t.student.name, what: `start ${startTime}`, reason: "entered by student" } },
@@ -77,7 +79,9 @@ export async function studentStartAction(_: ActionState, fd: FormData): Promise<
     );
     if (!res.modifiedCount) {
       const e2 = await entries.findOne({ _id: t.id });
-      return e2?.startTime ? { ok: true, message: `Your start time is already on the sheet: ${time12(e2.startTime)}.` } : { error: "Today's row is already signed by staff. Ask a staff member." };
+      if (e2?.startTime) return { ok: true, message: `Your start time is already on the sheet: ${time12(e2.startTime)}.` };
+      if (e2?.status === "HOLIDAY") return { error: `Today is marked as a holiday for your class${e2.note ? ` (${e2.note})` : ""}. Ask a staff member if that's wrong.` };
+      return { error: "Today's row is already signed by staff. Ask a staff member." };
     }
   }
   await audit(t.student._id, "student.start", t.id, { typed: startTime, savedAt: now.toISOString(), lateBy: checked.lateBy });
@@ -86,35 +90,25 @@ export async function studentStartAction(_: ActionState, fd: FormData): Promise<
 }
 
 /**
- * First time only: the student puts their handwritten signature on file (a photo of it, or drawn).
- * After that it is applied automatically each day they fill out. Only staff can replace it, so a
- * signature on file can't be swapped by someone else using the student's PIN.
+ * Saves the student's handwritten signature for one row. The first signature a student writes is
+ * also kept on file, so staff can add it for them on a day they forgot to sign.
  */
-export async function setMySignatureAction(_: ActionState, fd: FormData): Promise<ActionState> {
-  const student = await currentStudent();
-  if (!student) return { error: "You were signed out. Find your name again." };
-  if (student.signatureId) return { error: "Your signature is already on file. Ask a staff member if it needs changing." };
-  const checked = checkSignaturePng(fd.get("signature"));
-  if ("error" in checked) return { error: checked.error };
-  const source = fd.get("source") === "UPLOAD" ? "UPLOAD" : "DRAWN";
-  const id = await saveSignature("STUDENT", student._id, checked.png, source, student._id);
-  const res = await (await cols()).students.updateOne({ _id: student._id, signatureId: null }, { $set: { signatureId: id } });
-  if (!res.modifiedCount) return { error: "Your signature is already on file." };
-  await audit(student._id, "student.signature_on_file", student._id, { signatureId: id, source });
-  revalidatePath("/student/sheet");
-  return { ok: true, message: "Signature saved. From now on, it's added for you when you enter your end time." };
+async function saveDailySignature(student: { _id: string; signatureId: string | null }, png: string) {
+  const id = await saveSignature("STUDENT", student._id, png, "DRAWN", student._id);
+  if (!student.signatureId) await (await cols()).students.updateOne({ _id: student._id, signatureId: null }, { $set: { signatureId: id } });
+  return id;
 }
 
 /**
- * "End" at the end of class: the student types the time they left. The server checks it (after the
- * start, not before the start was entered, not in the future, within the window, a sensible length),
- * then writes the end time and hours and signs the row with the student's signature on file. Once.
+ * "End" at the end of class: the student types the time they left and signs by hand. The server
+ * checks the time (after the start, not before the start was entered, not in the future, within the
+ * window, a sensible length), then writes the end time, the hours and the student's handwritten
+ * signature. Once.
  */
 export async function studentFillAction(_: ActionState, fd: FormData): Promise<ActionState> {
   const now = new Date();
   const t = await todayFor(now);
   if ("error" in t) return { error: t.error };
-  if (!t.student.signatureId) return { error: "Put your signature on file first." };
   if (!(await rateLimit(`time:${t.student._id}`, 30, 600))) return { error: "Too many tries. Wait a few minutes, or ask a staff member." };
   const { entries } = await cols();
   const entry = await entries.findOne({ _id: t.id });
@@ -126,15 +120,76 @@ export async function studentFillAction(_: ActionState, fd: FormData): Promise<A
     enteredAtMinutes: entry.startAt && todayIn(env().APP_TIMEZONE, entry.startAt) === t.date ? schoolMinutes(entry.startAt) : null,
   });
   if (!checked.ok) return { error: checked.error, fieldErrors: { time: checked.error } };
+  const sig = checkSignaturePng(fd.get("signature"));
+  if ("error" in sig) return { error: "Sign in the box before saving.", fieldErrors: { signature: sig.error } };
   const endTime = checked.time;
   const minutes = minutesBetween(entry.startTime, endTime);
   if (minutes === null) return { error: "Your end time must be after your start time." };
+  const signatureId = await saveDailySignature(t.student, sig.png);
   const res = await entries.updateOne(
     { _id: t.id, endTime: null, startTime: entry.startTime, status: "PRESENT", staffSignature: null },
-    { $set: { endAt: now, endTime, minutes, endLateBy: checked.lateBy, studentSignature: { id: t.student.signatureId, at: now }, updatedAt: now } },
+    { $set: { endAt: now, endTime, minutes, endLateBy: checked.lateBy, studentSignature: { id: signatureId, at: now }, updatedAt: now } },
   );
   if (!res.modifiedCount) return { error: "Today's row changed. Reload the page." };
-  await audit(t.student._id, "student.fill", t.id, { typed: endTime, savedAt: now.toISOString(), lateBy: checked.lateBy, minutes, signatureId: t.student.signatureId });
+  await audit(t.student._id, "student.fill", t.id, { typed: endTime, savedAt: now.toISOString(), lateBy: checked.lateBy, minutes, signatureId });
   revalidatePath("/student/sheet");
   return { ok: true, message: `Done for today: ${time12(entry.startTime)} to ${time12(endTime)}, signed.` };
+}
+
+/**
+ * The student signs one of their own rows by hand, when the times are there but their signature
+ * isn't (for example staff wrote the end time because the student forgot). Only while the row is
+ * still open (the editing window) and before staff have validated it.
+ */
+export async function studentSignRowAction(date: string, _: ActionState, fd: FormData): Promise<ActionState> {
+  const student = await currentStudent();
+  if (!student) return { error: "You were signed out. Find your name again." };
+  if (!DATE_RE.test(date)) return { error: "Invalid day." };
+  if (date > todayIn(env().APP_TIMEZONE)) return { error: "You can't sign a day that hasn't happened yet." };
+  if (isLocked(date)) return { error: `${usDate(date)} is locked. Ask a staff member.` };
+  if (!(await rateLimit(`time:${student._id}`, 30, 600))) return { error: "Too many tries. Wait a few minutes, or ask a staff member." };
+  const sig = checkSignaturePng(fd.get("signature"));
+  if ("error" in sig) return { error: sig.error };
+  const id = `${student._id}:${date}`;
+  const { entries } = await cols();
+  const e = await entries.findOne({ _id: id });
+  if (!e || e.status !== "PRESENT" || !e.startTime || !e.endTime) return { error: "This day needs a start and end time before you sign it." };
+  if (e.studentSignature) return { ok: true, message: "This day is already signed." };
+  if (e.staffSignature) return { error: "Staff have already signed this day. Ask a staff member." };
+  const signatureId = await saveDailySignature(student, sig.png);
+  const now = new Date();
+  const res = await entries.updateOne(
+    { _id: id, studentSignature: null, staffSignature: null, status: "PRESENT", startTime: e.startTime, endTime: e.endTime },
+    {
+      $set: { studentSignature: { id: signatureId, at: now }, updatedAt: now },
+      $push: { history: { at: now, byId: student._id, byName: student.name, what: "signed by student", reason: "signed by hand" } },
+    },
+  );
+  if (!res.modifiedCount) return { error: "This day changed. Reload the page." };
+  await audit(student._id, "student.sign_row", id, { signatureId });
+  revalidatePath("/student/sheet");
+  return { ok: true, message: `${usDate(date)} signed.` };
+}
+
+/** The student adds a note to today's row: typed, handwritten, or both. */
+export async function studentCommentAction(_: ActionState, fd: FormData): Promise<ActionState> {
+  const now = new Date();
+  const t = await todayFor(now);
+  if ("error" in t) return { error: t.error };
+  if (!(await rateLimit(`comment:${t.student._id}`, 20, 600))) return { error: "Too many notes. Wait a few minutes." };
+  const text = String(fd.get("text") ?? "").trim().slice(0, 500);
+  const rawInk = String(fd.get("ink") ?? "");
+  const ink = rawInk ? checkNotePng(rawInk) : null;
+  if (ink && "error" in ink) return { error: ink.error };
+  if (!text && !ink) return { error: "Type or write a note first." };
+  const { entries } = await cols();
+  const e = await entries.findOne({ _id: t.id }, { projection: { comments: 1 } });
+  if (!e) return { error: "Enter your start time first, then add a note." };
+  if ((e.comments?.length ?? 0) >= 50) return { error: "This day has too many notes." };
+  const inkId = ink ? await saveSignature("STUDENT", t.student._id, ink.png, "DRAWN", t.student._id, "NOTE") : null;
+  const c: RowComment = { id: newId(), at: now, byId: t.student._id, byName: t.student.name, byRole: "STUDENT", text, inkId };
+  await entries.updateOne({ _id: t.id }, { $push: { comments: c } });
+  await audit(t.student._id, "student.comment", t.id, { commentId: c.id, handwritten: !!inkId });
+  revalidatePath("/student/sheet");
+  return { ok: true, message: "Note added to today." };
 }

@@ -2,18 +2,25 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { randomInt } from "node:crypto";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
-import { audit, cols, isDuplicateKey, newId, type Student } from "@/lib/db";
+import { EMPTY_PROFILE, audit, cols, isDuplicateKey, newId, type Student, type StudentProfile } from "@/lib/db";
 import { requireStaff } from "@/lib/auth";
 import { canSee } from "@/lib/access";
 import { checkSignaturePng, saveSignature } from "@/lib/signatures";
 import { DATE_RE, parseDate, parseStudentsCsv, type StudentInput } from "@/lib/sheet";
+import { PIN_RE, weakPin } from "@/lib/pin";
+import { freePin, pinKey, pinTaken } from "@/lib/pins";
 import type { ActionState } from "@/lib/action";
 
 const refresh = () => { revalidatePath("/staff", "layout"); revalidatePath("/student", "layout"); };
-const newPin = () => String(randomInt(0, 10000)).padStart(4, "0");
+/** Checks a PIN typed by staff. Returns a message, or null if it can be used. */
+async function typedPinProblem(pin: string, exceptStudentId?: string) {
+  if (!PIN_RE.test(pin)) return "4 to 6 digits";
+  if (weakPin(pin)) return "Too easy to guess (like 1234 or 0000). Choose another";
+  if (await pinTaken(pin, exceptStudentId)) return "Another student already has this PIN. Choose another";
+  return null;
+}
 const DEFAULT_DAYS = [1, 2, 3, 4, 5];
 
 function studentFields(fd: FormData): { value?: Omit<StudentInput, "pin"> & { classDays: number[] }; errors?: Record<string, string> } {
@@ -51,10 +58,21 @@ export async function saveStudentAction(studentId: string | null, _: ActionState
     return { ok: true, message: "Saved." };
   }
   const typed = String(fd.get("pin") ?? "").trim();
-  if (typed && !/^\d{4,6}$/.test(typed)) return { fieldErrors: { pin: "4 to 6 digits" } };
-  const pin = typed || newPin();
-  const s: Student = { _id: newId(), ...f.value, nameLower: f.value.name.toLowerCase(), pinHash: await bcrypt.hash(pin, 10), signatureId: null, active: true, createdAt: new Date() };
-  await students.insertOne(s);
+  if (typed) {
+    const problem = await typedPinProblem(typed);
+    if (problem) return { fieldErrors: { pin: problem } };
+  }
+  const pin = typed || (await freePin());
+  const s: Student = {
+    _id: newId(), ...f.value, nameLower: f.value.name.toLowerCase(), pinHash: await bcrypt.hash(pin, 10), pinKey: pinKey(pin),
+    signatureId: null, profile: { ...EMPTY_PROFILE }, active: true, createdAt: new Date(),
+  };
+  try {
+    await students.insertOne(s);
+  } catch (e) {
+    if (isDuplicateKey(e)) return { fieldErrors: { pin: "Another student just got this PIN. Try again." } };
+    throw e;
+  }
   await audit(staff._id, "admin.add_student", s._id, { name: s.name });
   refresh();
   return { ok: true, message: `${s.name} added. Their PIN is ${pin}. Give it to them now; it isn't shown again.`, data: { id: s._id, pin } };
@@ -77,18 +95,40 @@ export async function importStudentsAction(_: ActionState, fd: FormData): Promis
   const existing = new Set((await students.find({ nameLower: { $in: rows.map((r) => r.name.toLowerCase()) }, active: true }, { projection: { nameLower: 1 } }).toArray()).map((s) => s.nameLower));
   const skip = rows.filter((r) => existing.has(r.name.toLowerCase()));
   const add = rows.filter((r) => !existing.has(r.name.toLowerCase()));
+  // PINs typed in the file must be unique (in the file and among active students), and not trivial.
+  const typedSeen = new Map<string, string>();
+  const pinErrors: string[] = [];
+  for (const r of add) {
+    if (!r.pin) continue;
+    if (weakPin(r.pin)) pinErrors.push(`${r.name}: PIN ${r.pin} is too easy to guess.`);
+    else if (typedSeen.has(r.pin)) pinErrors.push(`${r.name}: same PIN as ${typedSeen.get(r.pin)}.`);
+    else if (await pinTaken(r.pin)) pinErrors.push(`${r.name}: PIN ${r.pin} is already used by another student.`);
+    typedSeen.set(r.pin, r.name);
+  }
+  if (pinErrors.length) return { error: `Nothing was imported. Every student needs their own PIN: ${pinErrors.slice(0, 8).join(" ")}${pinErrors.length > 8 ? ` (${pinErrors.length - 8} more)` : ""} Leave the pin column empty to get random ones.` };
+  const used = new Set(typedSeen.keys());
   const pins: { name: string; pin: string }[] = [];
   const docs: Student[] = [];
   for (const r of add) {
-    const pin = r.pin || newPin();
+    const pin = r.pin || (await freePin(used));
+    used.add(pin);
     pins.push({ name: r.name, pin });
     docs.push({
-      _id: newId(), name: r.name, nameLower: r.name.toLowerCase(), pinHash: await bcrypt.hash(pin, 10), courseName: r.courseName, courseCode: r.courseCode,
+      _id: newId(), name: r.name, nameLower: r.name.toLowerCase(), pinHash: await bcrypt.hash(pin, 10), pinKey: pinKey(pin), courseName: r.courseName, courseCode: r.courseCode,
       courseDuration: r.courseDuration, caseManager: r.caseManager, instructor: r.instructor, startDate: r.startDate, endDate: r.endDate,
-      classDays: DEFAULT_DAYS, signatureId: null, active: true, createdAt: new Date(),
+      classDays: DEFAULT_DAYS, signatureId: null, profile: { ...EMPTY_PROFILE }, active: true, createdAt: new Date(),
     });
   }
-  if (docs.length) await students.insertMany(docs);
+  if (docs.length) {
+    try {
+      // ordered: false would leave a half-imported file; ordered stops at the first problem and we undo it.
+      await students.insertMany(docs);
+    } catch (e) {
+      await students.deleteMany({ _id: { $in: docs.map((d) => d._id) } });
+      if (isDuplicateKey(e)) return { error: "Nothing was imported: a PIN was given to another student at the same moment. Import the file again." };
+      throw e;
+    }
+  }
   await audit(staff._id, "admin.import_students", "students", { added: docs.length, skipped: skip.length });
   refresh();
   return {
@@ -98,22 +138,47 @@ export async function importStudentsAction(_: ActionState, fd: FormData): Promis
   };
 }
 
-/** New PIN for a student who forgot theirs. Shown once. */
-export async function resetPinAction(studentId: string, _: ActionState): Promise<ActionState> {
-  const staff = await requireStaff();
+/**
+ * New PIN for a student (forgot it, or their PIN is from before PINs were unique). Admins only.
+ * The admin can type one, or leave it empty for a random one. Shown once.
+ */
+export async function resetPinAction(studentId: string, _: ActionState, fd?: FormData): Promise<ActionState> {
+  const staff = await requireStaff("ADMIN");
   const { students } = await cols();
   const student = await students.findOne({ _id: studentId });
-  if (!student || !canSee(staff, student)) return { error: "Student not found." };
-  const pin = newPin();
-  await students.updateOne({ _id: studentId }, { $set: { pinHash: await bcrypt.hash(pin, 10) } });
-  await audit(staff._id, "admin.reset_pin", studentId);
-  return { ok: true, message: `New PIN: ${pin}. Give it to the student now; it isn't shown again.` };
+  if (!student) return { error: "Student not found." };
+  const typed = String(fd?.get("pin") ?? "").trim();
+  if (typed) {
+    const problem = await typedPinProblem(typed, studentId);
+    if (problem) return { fieldErrors: { pin: problem } };
+  }
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const pin = typed || (await freePin());
+    try {
+      await students.updateOne({ _id: studentId }, { $set: { pinHash: await bcrypt.hash(pin, 10), pinKey: pinKey(pin) } });
+    } catch (e) {
+      if (isDuplicateKey(e) && !typed) continue; // someone else got it a moment ago: pick another
+      if (isDuplicateKey(e)) return { fieldErrors: { pin: "Another student already has this PIN. Choose another" } };
+      throw e;
+    }
+    await audit(staff._id, "admin.reset_pin", studentId);
+    refresh();
+    return { ok: true, message: `New PIN for ${student.name}: ${pin}. Give it to them now; it isn't shown again.` };
+  }
+  return { error: "Couldn't set a new PIN. Try again." };
 }
 
 export async function setStudentActiveAction(studentId: string, _: ActionState, fd: FormData): Promise<ActionState> {
   const staff = await requireStaff("ADMIN");
   const active = fd.get("active") === "1";
-  await (await cols()).students.updateOne({ _id: studentId }, { $set: { active } });
+  try {
+    const res = await (await cols()).students.updateOne({ _id: studentId }, { $set: { active } });
+    if (!res.matchedCount) return { error: "Student not found." };
+  } catch (e) {
+    // Back on the list, but a student added since then has the same PIN.
+    if (isDuplicateKey(e)) return { error: "Another active student now has this student's PIN. Give them a new PIN first, then put them back on the list." };
+    throw e;
+  }
   await audit(staff._id, active ? "admin.reactivate_student" : "admin.deactivate_student", studentId);
   refresh();
   return { ok: true, message: active ? "Student is active again." : "Student removed from the sign-in list. Their sheets are kept." };
@@ -123,9 +188,10 @@ export async function addHolidayAction(_: ActionState, fd: FormData): Promise<Ac
   const staff = await requireStaff("ADMIN");
   const date = parseDate(String(fd.get("date") ?? ""));
   const name = String(fd.get("name") ?? "").trim().slice(0, 60) || "Holiday";
+  const note = String(fd.get("note") ?? "").trim().slice(0, 120);
   if (!date || !DATE_RE.test(date)) return { fieldErrors: { date: "Choose a date" } };
-  await (await cols()).holidays.updateOne({ _id: date }, { $set: { name } }, { upsert: true });
-  await audit(staff._id, "admin.add_holiday", date, { name });
+  await (await cols()).holidays.updateOne({ _id: date }, { $set: { name, note } }, { upsert: true });
+  await audit(staff._id, "admin.add_holiday", date, { name, note });
   refresh();
   return { ok: true, message: "Holiday added. It shows on every student's sheet." };
 }
@@ -228,4 +294,27 @@ export async function goToSheetAction(_: ActionState, fd: FormData): Promise<Act
   const month = String(fd.get("month") ?? "");
   if (!z.string().uuid().safeParse(id).success || !/^\d{4}-\d{2}$/.test(month)) return { error: "Choose a student and month." };
   redirect(`/staff/sheets/${id}/${month}`);
+}
+
+const profileSchema = z.object({
+  phone: z.string().trim().max(40).default(""),
+  email: z.union([z.literal(""), z.string().trim().toLowerCase().email("Enter a valid email")]).default(""),
+  address: z.string().trim().max(200).default(""),
+  emergencyName: z.string().trim().max(120).default(""),
+  emergencyPhone: z.string().trim().max(40).default(""),
+  social: z.string().trim().max(2000).default(""),
+});
+
+/** Contact and social details on the student profile. Admins only. */
+export async function saveStudentProfileAction(studentId: string, _: ActionState, fd: FormData): Promise<ActionState> {
+  const staff = await requireStaff("ADMIN");
+  const get = (k: string) => String(fd.get(k) ?? "");
+  const p = profileSchema.safeParse({ phone: get("phone"), email: get("email").trim(), address: get("address"), emergencyName: get("emergencyName"), emergencyPhone: get("emergencyPhone"), social: get("social") });
+  if (!p.success) return { fieldErrors: Object.fromEntries(p.error.issues.map((i) => [String(i.path[0]), i.message])) };
+  const profile: StudentProfile = p.data;
+  const res = await (await cols()).students.updateOne({ _id: studentId }, { $set: { profile } });
+  if (!res.matchedCount) return { error: "Student not found." };
+  await audit(staff._id, "admin.edit_student_profile", studentId, { fields: Object.keys(profile).filter((k) => profile[k as keyof StudentProfile]) });
+  refresh();
+  return { ok: true, message: "Profile saved." };
 }

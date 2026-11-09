@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, useTransition } from "react";
 import type { ActionState } from "@/lib/action";
 import { checkTypedTime, clockIn, time12, toMinutes, type TimeRules } from "@/lib/sheet";
+import { InkField, type InkValue } from "./Ink";
 
 /** The school's clock, kept in step with the server rather than the tablet's own (possibly wrong) clock. */
 export type SchoolClock = { tz: string; serverNow: number; rules: TimeRules };
@@ -40,6 +41,9 @@ export function TimeEntry({ kind, clock, start, action, onDone, onCancel }: {
   const [step, setStep] = useState<"type" | "confirm">("type");
   const [error, setError] = useState<string | null>(null);
   const [pending, run] = useTransition();
+  /** End of day: the student signs by hand before saving. */
+  const [signature, setSignature] = useState<InkValue>(null);
+  const needsSignature = kind === "end";
   const input = useRef<HTMLInputElement>(null);
   useEffect(() => { input.current?.focus(); }, []);
 
@@ -58,15 +62,20 @@ export function TimeEntry({ kind, clock, start, action, onDone, onCancel }: {
   const save = () => run(async () => {
     const fd = new FormData();
     fd.set("time", value);
+    if (needsSignature) {
+      if (!signature) { setError("Sign in the box first."); return; }
+      fd.set("signature", signature.png);
+    }
     let r: ActionState;
     try { r = await action({}, fd); } catch { r = { error: "Couldn't save. Check the connection and try again." }; }
-    if (r.error) { setError(r.error); setStep("type"); return; }
+    // A signature problem keeps the student on this step; a time problem goes back to the time.
+    if (r.error) { setError(r.error); if (!r.fieldErrors?.signature) setStep("type"); return; }
     onDone(r);
   });
 
   const typed = check();
   return (
-    <div className="sigmodal" role="dialog" aria-modal="true" aria-labelledby="te-title" onKeyDown={(e) => { if (e.key === "Escape" && !pending) onCancel(); }}>
+    <div className="sigmodal" role="dialog" aria-modal="true" aria-labelledby="te-title" onKeyDown={(e) => { if (e.key === "Escape" && !pending && !document.querySelector(".inkmodal")) onCancel(); }}>
       <div className="panel timebox">
         <h2 id="te-title">{kind === "start" ? "When did you arrive?" : "When did class end for you?"}</h2>
         <p className="clocknow" aria-live="off">It&apos;s <strong>{time12(hhmm(now))}</strong> now</p>
@@ -99,14 +108,21 @@ export function TimeEntry({ kind, clock, start, action, onDone, onCancel }: {
               {kind === "start" ? "Start time" : "End time"}: <span className="hand">{time12(value)}</span>
             </p>
             {kind === "end" && start && typed.ok && (
-              <p>{time12(start.time)} to {time12(value)}, which is {Math.floor((toMinutes(value) - toMinutes(start.time)) / 60)} h {(toMinutes(value) - toMinutes(start.time)) % 60} min. Your signature will be added to today&apos;s row.</p>
+              <p>{time12(start.time)} to {time12(value)}, which is {Math.floor((toMinutes(value) - toMinutes(start.time)) / 60)} h {(toMinutes(value) - toMinutes(start.time)) % 60} min.</p>
+            )}
+            {needsSignature && (
+              <InkField
+                kind="signature" label="Your signature" required compact={false}
+                title="Sign for today" hint="Use your finger, a stylus or the mouse. Undo or clear if you want to try again."
+                value={signature} onChange={(v) => { setSignature(v); setError(null); }}
+              />
             )}
             <p className="small muted">You can&apos;t change this yourself after saving. If it&apos;s wrong later, a staff member can correct it.</p>
             {!typed.ok && <p className="msg err" role="alert">{typed.error}</p>}
             {error && <p className="msg err" role="alert">{error}</p>}
             <div className="row" style={{ justifyContent: "flex-end", marginTop: 16 }}>
               <button type="button" className="btn ghost" disabled={pending} onClick={() => setStep("type")}>Change it</button>
-              <button type="button" className="btn" disabled={pending || !typed.ok} onClick={save}>{pending ? "Saving…" : `Save ${word} time`}</button>
+              <button type="button" className="btn" disabled={pending || !typed.ok || (needsSignature && !signature)} onClick={save}>{pending ? "Saving…" : needsSignature ? "Save end time and signature" : `Save ${word} time`}</button>
             </div>
           </div>
         )}

@@ -18,9 +18,10 @@ export const timeRules = (): TimeRules => {
 /** The school's clock right now (or at an instant), in minutes since midnight, seconds dropped. */
 export const schoolMinutes = (at = new Date()) => toMinutes(clockIn(env().APP_TIMEZONE, at, "end"));
 
+/** School-wide holidays between two dates: date -> what is written on the sheet (name, and the note if any). */
 export async function holidaysBetween(from: string, to: string) {
   const list = await (await cols()).holidays.find({ _id: { $gte: from, $lte: to } }).toArray();
-  return new Map(list.map((h) => [h._id, h.name]));
+  return new Map(list.map((h) => [h._id, h.note ? `${h.name} – ${h.note}` : h.name]));
 }
 
 /** Everything one month's sheet shows for one student. */
@@ -34,7 +35,10 @@ export async function loadSheet(studentId: string, month: string) {
     approvals.findOne({ _id: `${studentId}:${month}` }),
   ]);
   const rows = sheetRows(student, month, list, holidays, today());
-  const images = await signatureImages([...list.flatMap((e) => [e.studentSignature?.id, e.staffSignature?.id]), approval?.signatureId]);
+  const images = await signatureImages([
+    ...list.flatMap((e) => [e.studentSignature?.id, e.staffSignature?.id, ...(e.comments ?? []).map((c) => c.inkId)]),
+    approval?.signatureId, approval?.commentsInkId,
+  ]);
   return {
     images,
     student,
@@ -72,3 +76,11 @@ export const sheetHeader = (s: Student) => ({
   _id: s._id, name: s.name, courseName: s.courseName, courseCode: s.courseCode, courseDuration: s.courseDuration,
   caseManager: s.caseManager, instructor: s.instructor, startDate: s.startDate, endDate: s.endDate,
 });
+
+/**
+ * Rows as sent to the browser. A student's own sheet must not show staff-only details, so comments
+ * are filtered: a student sees their own comments and staff comments, which is everything on their
+ * row (nothing on a row belongs to another student). History stays out of the student view.
+ */
+export const rowsForStudent = (rows: SheetData["rows"]) =>
+  rows.map((r) => (r.entry ? { ...r, entry: { ...r.entry, history: [] } } : r));

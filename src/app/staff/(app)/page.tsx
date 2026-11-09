@@ -5,6 +5,7 @@ import { courseNames, loadDay, today } from "@/lib/data";
 import { DATE_RE, WEEKDAY_NAMES, usDate, weekday } from "@/lib/sheet";
 import { TodayBoard } from "@/components/TodayBoard";
 import { AutoRefresh } from "@/components/Idle";
+import { lockedFor } from "@/lib/policy";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Today" };
@@ -30,7 +31,7 @@ export default async function StaffToday({ searchParams }: { searchParams: Promi
         <button className="btn ghost">Show</button>
         {date !== now && <Link className="btn ghost" href="/staff">Back to today</Link>}
       </form>
-      <TodayBoard key={`${date}:${course ?? ""}`} date={date} month={date.slice(0, 7)} holiday={day.holiday} hasSaved={!!staff.signatureId} isToday={date === now}
+      <TodayBoard key={`${date}:${course ?? ""}`} date={date} month={date.slice(0, 7)} holiday={day.holiday} hasSaved={!!staff.signatureId} isToday={date === now} locked={lockedFor(staff, date)}
         rows={day.rows.map(({ student: s, entry: e }) => ({
           id: s._id, name: s.name, course: s.courseName, status: e?.status ?? null, start: e?.startTime ?? null, end: e?.endTime ?? null,
           minutes: e?.minutes ?? null, startLateBy: e?.startLateBy ?? null, endLateBy: e?.endLateBy ?? null, studentSigned: !!e?.studentSignature, staffSigned: !!e?.staffSignature, studentHasSignature: !!s.signatureId,

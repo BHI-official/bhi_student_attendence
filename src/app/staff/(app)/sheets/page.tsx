@@ -43,7 +43,7 @@ export default async function Sheets({ searchParams }: { searchParams: Promise<{
           <tbody>
             {list.map((s) => (
               <tr key={s._id}>
-                <td>{s.name}</td>
+                <td><Link href={`/staff/students/${s._id}`}>{s.name}</Link></td>
                 <td className="muted">{s.courseName}</td>
                 {months.map((m) => (
                   <td key={m}>

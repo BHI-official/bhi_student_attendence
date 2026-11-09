@@ -17,11 +17,28 @@ export type Staff = {
   createdAt: Date;
 };
 
+/** Contact and social details shown on the student profile. All optional. */
+export type StudentProfile = {
+  phone: string;
+  email: string;
+  address: string;
+  emergencyName: string;
+  emergencyPhone: string;
+  /** Free text: social / case notes the office wants on the profile (housing, transport, benefits...). */
+  social: string;
+};
+export const EMPTY_PROFILE: StudentProfile = { phone: "", email: "", address: "", emergencyName: "", emergencyPhone: "", social: "" };
+
 export type Student = {
   _id: string;
   name: string;
   nameLower: string;
   pinHash: string;
+  /**
+   * Keyed fingerprint of the PIN (HMAC), used only to keep PINs unique among active students.
+   * null for students whose PIN was set before PINs were made unique (give them a new PIN).
+   */
+  pinKey?: string | null;
   /** The student's handwritten signature on file, applied to each day they fill out. */
   signatureId: string | null;
   courseName: string;
@@ -33,6 +50,7 @@ export type Student = {
   endDate: string;
   /** Class weekdays, 1 = Monday ... 7 = Sunday. */
   classDays: number[];
+  profile?: StudentProfile;
   active: boolean;
   createdAt: Date;
 };
@@ -49,6 +67,8 @@ export type SignatureDoc = {
   ownerId: string;
   png: string; // data:image/png;base64,...
   source: "UPLOAD" | "DRAWN";
+  /** A signature, or handwriting written into a note / comment field. Missing = signature. */
+  kind?: "SIGNATURE" | "NOTE";
   createdAt: Date;
   createdBy: string; // who put it on file (the person, or the staff member who uploaded it for them)
 };
@@ -61,6 +81,21 @@ export type Signature = {
 export type StaffSignature = Signature & { staffId: string; staffName: string };
 
 export type Change = { at: Date; byId: string; byName: string; what: string; reason: string };
+
+/**
+ * A comment on one row (one student, one day). Comments are added, never edited, and don't change
+ * the row's times or signatures, so they don't undo a staff signature or a month approval.
+ */
+export type RowComment = {
+  id: string;
+  at: Date;
+  byId: string;
+  byName: string;
+  byRole: "ADMIN" | "TEACHER" | "STUDENT";
+  text: string;
+  /** Handwriting written with the comment (a SignatureDoc of kind NOTE), if any. */
+  inkId: string | null;
+};
 
 /** One row of the paper sheet: one student, one date. _id = `${studentId}:${date}`. */
 export type Entry = {
@@ -83,10 +118,12 @@ export type Entry = {
   staffSignature: StaffSignature | null;
   note: string;
   history: Change[];
+  /** Comments from staff (and the student on their own day). Older rows have none. */
+  comments?: RowComment[];
   updatedAt: Date;
 };
 
-export type Holiday = { _id: string /* date */; name: string };
+export type Holiday = { _id: string /* date */; name: string; /** Optional note shown with the holiday. */ note?: string };
 
 /** "Approved by" block at the bottom of a month. _id = `${studentId}:${month}`. */
 export type MonthApproval = {
@@ -98,6 +135,8 @@ export type MonthApproval = {
   position: string;
   signatureId: string;
   comments: string;
+  /** Handwritten comments (a SignatureDoc of kind NOTE), if the approver wrote them by hand. */
+  commentsInkId?: string | null;
   entriesHash: string;
   signedAt: Date;
 };

@@ -9,6 +9,11 @@ const schema = z.object({
   TIME_ENTRY_WINDOW_MINUTES: z.coerce.number().int().min(0).max(120).default(15),
   MIN_CLASS_MINUTES: z.coerce.number().int().min(1).max(240).default(5),
   MAX_CLASS_MINUTES: z.coerce.number().int().min(60).max(1440).default(720),
+  /** Rows can be changed by teachers for this many days after the class day; after that only admins. */
+  EDIT_WINDOW_DAYS: z.coerce.number().int().min(0).max(60).default(7),
+  /** Attendance colours on the profile: at or above GOOD is green, at or above ATTENTION is orange, below is red. */
+  ATTENDANCE_GOOD_PERCENT: z.coerce.number().min(1).max(100).default(90),
+  ATTENDANCE_ATTENTION_PERCENT: z.coerce.number().min(0).max(100).default(75),
   NODE_ENV: z.string().default("development"),
 });
 
@@ -20,6 +25,9 @@ export function env() {
   const parsed = schema.safeParse(process.env);
   if (!parsed.success) {
     throw new Error(`Invalid environment: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
+  }
+  if (parsed.data.ATTENDANCE_ATTENTION_PERCENT > parsed.data.ATTENDANCE_GOOD_PERCENT) {
+    throw new Error("Invalid environment: ATTENDANCE_ATTENTION_PERCENT must not be above ATTENDANCE_GOOD_PERCENT");
   }
   cached = parsed.data;
   return cached;

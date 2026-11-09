@@ -7,6 +7,7 @@ import type { ActionState } from "@/lib/action";
 import { LATE_ENTRY_FLAG_MINUTES, hoursText, time12 } from "@/lib/sheet";
 import { fillStudentSignatureAction, markAbsentAction, signRowsAction } from "@/actions/staff";
 import { Msg } from "./forms";
+import { InkPad } from "./Ink";
 
 export type BoardRow = {
   id: string; name: string; course: string;
@@ -21,8 +22,10 @@ export type BoardRow = {
 /** One day, every student with class that day: who started, ended, signed; staff sign many rows at once. */
 const isLate = (m: number | null) => m != null && m >= LATE_ENTRY_FLAG_MINUTES;
 
-export function TodayBoard({ date, month, rows, holiday, hasSaved, isToday }: {
+export function TodayBoard({ date, month, rows, holiday, hasSaved, isToday, locked }: {
   date: string; month: string; rows: BoardRow[]; holiday: string | null; hasSaved: boolean; isToday: boolean;
+  /** This day is older than the editing window and the viewer isn't an admin: read only. */
+  locked: string | null;
 }) {
   const router = useRouter();
   const [q, setQ] = useState("");
@@ -30,11 +33,12 @@ export function TodayBoard({ date, month, rows, holiday, hasSaved, isToday }: {
   const [msg, setMsg] = useState<ActionState>({});
   const [pending, start] = useTransition();
   const [withStudent, setWithStudent] = useState(true);
+  const [hand, setHand] = useState<string[] | null>(null);
 
   /** A present day with both times and no student signature: staff can fill it. */
   const missingStudent = (r: BoardRow) => !holiday && r.status === "PRESENT" && !!r.start && !!r.end && !r.studentSigned;
   /** Holidays are never signed. */
-  const ready = (r: BoardRow) => !holiday && r.status !== "HOLIDAY" && !r.staffSigned && r.status !== null && (r.status !== "PRESENT" || (!!r.start && !!r.end));
+  const ready = (r: BoardRow) => !locked && !holiday && r.status !== "HOLIDAY" && !r.staffSigned && r.status !== null && (r.status !== "PRESENT" || (!!r.start && !!r.end));
   const shown = useMemo(() => {
     const t = q.trim().toLowerCase();
     return t ? rows.filter((r) => r.name.toLowerCase().includes(t) || r.course.toLowerCase().includes(t)) : rows;
@@ -51,9 +55,10 @@ export function TodayBoard({ date, month, rows, holiday, hasSaved, isToday }: {
     try { setMsg(await fn()); } catch { setMsg({ error: "Something went wrong. Try again." }); }
     router.refresh();
   });
-  const sign = () => {
+  const sign = (handPng?: string) => {
     const fd = new FormData();
     fd.set("rows", JSON.stringify([...picked].map((id) => `${id}:${date}`)));
+    if (handPng) fd.set("signature", handPng);
     if (withStudent && pickedMissing.length) fd.set("withStudentSignature", "1");
     run(async () => { const r = await signRowsAction({}, fd); if (r.ok) setPicked(new Set()); return r; });
   };
@@ -73,6 +78,7 @@ export function TodayBoard({ date, month, rows, holiday, hasSaved, isToday }: {
     run(async () => { const res = await signRowsAction({}, fd); if (res.ok) setPicked((x) => { const n = new Set(x); n.delete(r.id); return n; }); return res; });
   };
   const toggle = (id: string) => setPicked((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const missingFillable = (r: BoardRow) => !locked && missingStudent(r);
   const timeTd = (t: string | null, lateBy: number | null) => (
     <td>
       {t ? time12(t) : <span className="muted">–</span>}
@@ -84,6 +90,7 @@ export function TodayBoard({ date, month, rows, holiday, hasSaved, isToday }: {
   return (
     <>
       {holiday && <p className="msg info">{holiday}: no class today, and no signatures needed.</p>}
+      {locked && <p className="msg info">{locked}</p>}
       <p className="lead">
         {rows.length} with class · {counts.started} started · {counts.ended} ended · {counts.studentSigned} signed by student · {counts.staffSigned} signed by staff
       </p>
@@ -93,7 +100,7 @@ export function TodayBoard({ date, month, rows, holiday, hasSaved, isToday }: {
       <div className="row no-print" style={{ marginBottom: 12 }}>
         <input className="search" style={{ minHeight: 46, fontSize: 17, maxWidth: 360 }} placeholder="Find a student or course" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Find a student or course" />
         <button className="btn ghost" onClick={() => setPicked(new Set(shown.filter(ready).map((r) => r.id)))}>Select all ready to sign ({shown.filter(ready).length})</button>
-        {!holiday && counts.notStarted > 0 && (isToday ? new Date().getHours() >= 12 : true) && (
+        {!holiday && !locked && counts.notStarted > 0 && (isToday ? new Date().getHours() >= 12 : true) && (
           <button className="btn ghost" disabled={pending} onClick={markAbsent}>Mark {counts.notStarted} not started as absent</button>
         )}
       </div>
@@ -105,13 +112,13 @@ export function TodayBoard({ date, month, rows, holiday, hasSaved, isToday }: {
             {shown.map((r) => (
               <tr key={r.id}>
                 <td>{ready(r) && <input type="checkbox" className="chk" checked={picked.has(r.id)} onChange={() => toggle(r.id)} aria-label={`Select ${r.name}`} />}</td>
-                <td><Link href={`/staff/sheets/${r.id}/${month}`}>{r.name}</Link></td>
+                <td><Link href={`/staff/students/${r.id}`}>{r.name}</Link> <Link className="small" href={`/staff/sheets/${r.id}/${month}`}>sheet</Link></td>
                 <td className="muted">{r.course}</td>
                 {r.status && r.status !== "PRESENT"
                   ? <td colSpan={3}><span className="tag no">{r.status.toLowerCase()}</span></td>
                   : <>{timeTd(r.start, r.startLateBy)}{timeTd(r.end, r.endLateBy)}<td>{hoursText(r.minutes)}</td></>}
                 <td>
-                  {missingStudent(r)
+                  {missingFillable(r)
                     ? (r.studentHasSignature
                       ? <button className="fill" style={{ minWidth: 150 }} disabled={pending} onClick={() => fillStudent(r)} aria-label={`Fill student signature for ${r.name}`}>Fill with signature</button>
                       : <Link className="small" href={`/staff/students/${r.id}`}>No signature on file</Link>)
@@ -132,9 +139,8 @@ export function TodayBoard({ date, month, rows, holiday, hasSaved, isToday }: {
       {picked.size > 0 && (
         <div className="sticky">
           <strong>{picked.size} selected</strong>
-          {hasSaved
-            ? <button className="btn" disabled={pending} onClick={sign}>Sign {picked.size} with my signature</button>
-            : <a className="btn" href="/staff/account">Put your signature on file first</a>}
+          {hasSaved && <button className="btn" disabled={pending} onClick={() => sign()}>Sign {picked.size} with my signature</button>}
+          <button className={hasSaved ? "btn ghost" : "btn"} disabled={pending} onClick={() => setHand([...picked])}>Sign {picked.size} by hand</button>
           {hasSaved && pickedMissing.length > 0 && (
             <label className="small" title="Uses each student's signature on file.">
               <input type="checkbox" className="chk" checked={withStudent} onChange={(e) => setWithStudent(e.target.checked)} />{" "}
@@ -144,6 +150,12 @@ export function TodayBoard({ date, month, rows, holiday, hasSaved, isToday }: {
           )}
           <button className="btn ghost" onClick={() => setPicked(new Set())}>Clear</button>
         </div>
+      )}
+      {hand && (
+        <InkPad
+          kind="signature" title={`Sign ${hand.length} row${hand.length === 1 ? "" : "s"}`} hint="Your signature validates the attendance on these rows." doneLabel="Sign"
+          onCancel={() => setHand(null)} onDone={(v) => { setHand(null); if (v) sign(v.png); }}
+        />
       )}
     </>
   );

@@ -6,7 +6,7 @@ import { usePathname } from "next/navigation";
 export function StaffNav({ admin }: { admin: boolean }) {
   const path = usePathname();
   const items = [
-    ["/staff", "Today"], ["/staff/sheets", "Monthly sheets"], ["/staff/students", "Students"], ["/staff/holidays", "Holidays"],
+    ["/staff", "Today"], ["/staff/sheets", "Monthly sheets"], ["/staff/students", "Students"], ["/staff/reports", "Reports"], ["/staff/holidays", "Holidays"],
     ...(admin ? [["/staff/team", "Staff accounts"]] : []), ["/staff/account", "My account"],
   ];
   return (

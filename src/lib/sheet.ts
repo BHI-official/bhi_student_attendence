@@ -267,3 +267,91 @@ export function checkTypedTime(
   }
   return { ok: true, time: t, lateBy: nowMinutes - m };
 }
+
+// ---------- Seven-day editing window ----------
+
+/** "2026-09-01" + 7 -> "2026-09-08". */
+export function addDays(date: string, days: number) {
+  const d = new Date(`${date}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * A row can be changed by teachers (and signed by the student) until `windowDays` days after its
+ * class day; after that it is locked and only an admin can change it. With a 7-day window, the
+ * row for Monday the 1st is editable through Monday the 8th and locked from the 9th.
+ */
+export function editWindow(date: string, today: string, windowDays: number) {
+  const lastDay = addDays(date, windowDays);
+  return { locked: today > lastDay, lastDay };
+}
+
+// ---------- Attendance summary and colour ----------
+
+export type AttendanceLevel = "good" | "attention" | "poor" | "none";
+export type AttendanceThresholds = { goodPercent: number; attentionPercent: number };
+export const DEFAULT_THRESHOLDS: AttendanceThresholds = { goodPercent: 90, attentionPercent: 75 };
+
+export type AttendanceSummary = {
+  /** Class days so far (course dates and weekdays), up to and including today. */
+  classDays: number;
+  holidays: number;
+  present: number;
+  absent: number;
+  excused: number;
+  /** Past class days with nothing recorded. Counted as absent in the rate. */
+  missing: number;
+  minutes: number;
+  /** present / (class days − holidays − excused − today if not yet recorded), 0–100, or null with nothing to count. */
+  rate: number | null;
+  level: AttendanceLevel;
+};
+
+export function attendanceLevel(rate: number | null, t: AttendanceThresholds = DEFAULT_THRESHOLDS): AttendanceLevel {
+  if (rate === null) return "none";
+  if (rate >= t.goodPercent) return "good";
+  if (rate >= t.attentionPercent) return "attention";
+  return "poor";
+}
+export const LEVEL_WORDS: Record<AttendanceLevel, string> = { good: "Good attendance", attention: "Needs attention", poor: "Poor attendance", none: "No attendance yet" };
+
+/**
+ * Attendance so far for one student. Today only counts once something is recorded for it, so a
+ * student isn't marked down in the morning before they arrive. Holidays (school-wide, or a row
+ * marked Holiday) and excused days are left out of the rate.
+ */
+export function attendanceSummary(
+  student: Pick<Student, "startDate" | "endDate" | "classDays">,
+  entries: Pick<Entry, "date" | "status" | "minutes">[],
+  holidays: Set<string> | Map<string, string>,
+  today: string,
+  t: AttendanceThresholds = DEFAULT_THRESHOLDS,
+): AttendanceSummary {
+  const byDate = new Map(entries.map((e) => [e.date, e]));
+  const out: AttendanceSummary = { classDays: 0, holidays: 0, present: 0, absent: 0, excused: 0, missing: 0, minutes: 0, rate: null, level: "none" };
+  const last = student.endDate < today ? student.endDate : today;
+  for (let d = student.startDate; d <= last; d = addDays(d, 1)) {
+    if (!isClassDay(student, d)) continue;
+    const e = byDate.get(d);
+    if (d === today && !e && !holidays.has(d)) continue; // the day isn't over yet (a holiday is already decided)
+    out.classDays++;
+    if (holidays.has(d) || e?.status === "HOLIDAY") { out.holidays++; continue; }
+    if (!e) { out.missing++; continue; }
+    if (e.status === "PRESENT") { out.present++; out.minutes += e.minutes ?? 0; }
+    else if (e.status === "ABSENT") out.absent++;
+    else if (e.status === "EXCUSED") out.excused++;
+  }
+  const counted = out.present + out.absent + out.missing;
+  out.rate = counted ? Math.round((out.present / counted) * 1000) / 10 : null;
+  out.level = attendanceLevel(out.rate, t);
+  return out;
+}
+
+/** Is the course running, finished, or yet to start? */
+export function enrollmentState(s: Pick<Student, "startDate" | "endDate" | "active">, today: string) {
+  if (!s.active) return "Inactive" as const;
+  if (today < s.startDate) return "Not started" as const;
+  if (today > s.endDate) return "Completed" as const;
+  return "Active" as const;
+}

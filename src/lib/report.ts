@@ -9,7 +9,8 @@ import { LOGO_PNG_BASE64 } from "./brand-logo";
 
 const LOGO_PNG = Buffer.from(LOGO_PNG_BASE64, "base64");
 import { loadSheet, thisMonth, type SheetData } from "./data";
-import { hoursText, monthTitle, shiftMonth, time12, usDate } from "./sheet";
+import { LEVEL_WORDS, hoursText, monthTitle, shiftMonth, time12, usDate, type AttendanceSummary } from "./sheet";
+import type { RowComment } from "./types";
 
 /** One month, or every month of the course up to now. */
 export async function loadReport(studentId: string, which: string) {
@@ -48,27 +49,62 @@ function rowCells(r: SheetData["rows"][number]) {
 
 // ---------- PDF ----------
 
+/**
+ * The PDF's built-in fonts can only write Western European characters; anything else would stop the
+ * whole report. Accents are kept where the font has them, other letters lose their accent (Ł -> L),
+ * and anything left (emoji, other scripts) becomes "?".
+ */
+const EXTRA: Record<string, string> = { Ł: "L", ł: "l", Đ: "D", đ: "d", ı: "i", Ħ: "H", ħ: "h", "\u2019": "'", "\u2018": "'", "\u201c": '"', "\u201d": '"', "\u2192": "->", "\u2026": "..." };
+export function pdfSafe(text: string, font: PDFFont) {
+  const ok = new Set(font.getCharacterSet());
+  let out = "";
+  for (const ch of String(text ?? "").replace(/[\r\n\t]+/g, " ")) {
+    if (ok.has(ch.codePointAt(0)!)) { out += ch; continue; }
+    const base = (EXTRA[ch] ?? ch.normalize("NFD").replace(/[\u0300-\u036f]/g, ""));
+    out += [...base].every((c) => ok.has(c.codePointAt(0)!)) && base ? base : "?";
+  }
+  return out;
+}
+
 type PdfCtx = {
   doc: PDFDocument; font: PDFFont; bold: PDFFont; logo: PDFImage;
-  image: (id: string | null, images: Record<string, string>) => Promise<PDFImage | null>;
+  image: (id: string | null | undefined, images: Record<string, string>) => Promise<PDFImage | null>;
 };
 
-export async function buildPdf(report: Report): Promise<Uint8Array> {
+async function pdfContext(title: string): Promise<PdfCtx> {
   const doc = await PDFDocument.create();
-  doc.setTitle(`Attendance: ${report.student.name}`);
+  doc.setTitle(pdfSafe(title, await doc.embedFont(StandardFonts.Helvetica)));
   doc.setAuthor(SCHOOL.name);
   doc.setProducer("BHI Attendance");
   const font = await doc.embedFont(StandardFonts.Helvetica);
   const bold = await doc.embedFont(StandardFonts.HelveticaBold);
   const logo = await doc.embedPng(LOGO_PNG);
   const cache = new Map<string, PDFImage>();
-  const image = async (id: string | null, images: Record<string, string>) => {
+  const image = async (id: string | null | undefined, images: Record<string, string>) => {
     if (!id || !images[id]) return null;
-    if (!cache.has(id)) cache.set(id, await doc.embedPng(pngBytes(images[id])));
+    if (!cache.has(id)) {
+      try { cache.set(id, await doc.embedPng(pngBytes(images[id]))); } catch { return null; } // a damaged image never stops the report
+    }
     return cache.get(id)!;
   };
-  for (const sheet of report.months) await pdfMonth({ doc, font, bold, logo, image }, sheet);
-  return doc.save();
+  return { doc, font, bold, logo, image };
+}
+
+export async function buildPdf(report: Report): Promise<Uint8Array> {
+  return buildPdfMany([report], `Attendance: ${report.student.name}`);
+}
+
+/** Several students' sheets in one PDF (e.g. a whole class for one month). */
+export async function buildPdfMany(reports: Report[], title: string): Promise<Uint8Array> {
+  const c = await pdfContext(title);
+  for (const report of reports) for (const sheet of report.months) await pdfMonth(c, sheet);
+  if (!c.doc.getPageCount()) {
+    const page = c.doc.addPage([612, 792]);
+    pdfLetterhead(c, page, 40, 572);
+    pdfFooter(c, page, 40, 572);
+    page.drawText("Nothing to show for this selection.", { x: 40, y: 640, size: 12, font: c.font });
+  }
+  return c.doc.save();
 }
 
 /** A clickable area on the page that opens `uri`. */
@@ -80,10 +116,10 @@ function pdfLink(doc: PDFDocument, page: PDFPage, x: number, y: number, w: numbe
   page.node.addAnnot(doc.context.register(annot));
 }
 
-const PAGE_TOP = 772, FOOTER_TOP = 50;
+const PORTRAIT_TOP = 772, LANDSCAPE_TOP = 592, FOOTER_TOP = 50;
 
 /** School letterhead at the top of every page: logo, name, address, phone, email, website. */
-function pdfLetterhead(c: PdfCtx, page: PDFPage, L: number, R: number) {
+function pdfLetterhead(c: PdfCtx, page: PDFPage, L: number, R: number, PAGE_TOP = PORTRAIT_TOP) {
   const navy = rgb(...SCHOOL.colorRgb), grey = rgb(0.25, 0.27, 0.33);
   const size = 58;
   page.drawImage(c.logo, { x: L, y: PAGE_TOP - size, width: size, height: size });
@@ -119,7 +155,7 @@ function pdfFooter(c: PdfCtx, page: PDFPage, L: number, R: number) {
   page.drawLine({ start: { x: L, y: y - 1.2 }, end: { x: L + lw, y: y - 1.2 }, thickness: 0.4, color: navy });
   const contact = `${SCHOOL.name}  ·  ${SCHOOL.phone}  ·  ${SCHOOL.email}`;
   page.drawText(contact, { x: R - c.font.widthOfTextAtSize(contact, 7.5), y, size: 7.5, font: c.font, color: grey });
-  page.drawText(`Generated ${new Date().toLocaleString("en-US")}. Times are recorded by the server when the student taps Start and Fill.`, { x: L, y: y - 11, size: 6.5, font: c.font, color: grey });
+  page.drawText(`Generated ${new Date().toLocaleString("en-US")}. Times are typed by the student and checked against the school's clock; signatures are handwritten.`, { x: L, y: y - 11, size: 6.5, font: c.font, color: grey });
 }
 
 async function pdfMonth(c: PdfCtx, sheet: SheetData) {
@@ -127,7 +163,7 @@ async function pdfMonth(c: PdfCtx, sheet: SheetData) {
   const page = doc.addPage([612, 792]); // US Letter
   const ink = rgb(0.11, 0.25, 0.67), black = rgb(0.1, 0.12, 0.18);
   const L = 40, R = 572;
-  const text = (p: PDFPage, t: string, x: number, yy: number, size = 8, f = font, color = black) => p.drawText(t, { x, y: yy, size, font: f, color });
+  const text = (p: PDFPage, t: string, x: number, yy: number, size = 8, f = font, color = black) => p.drawText(pdfSafe(t, f), { x, y: yy, size, font: f, color });
   const box = (x: number, yy: number, w: number, h: number) => page.drawRectangle({ x, y: yy, width: w, height: h, borderWidth: 0.8, borderColor: black });
 
   let y = pdfLetterhead(c, page, L, R) - 18;
@@ -142,7 +178,7 @@ async function pdfMonth(c: PdfCtx, sheet: SheetData) {
   for (const row of info) {
     y -= 15;
     let x = L;
-    row.forEach((v, i) => { box(x, y, iw[i], 15); text(page, String(v ?? "").slice(0, 44), x + 4, y + 4.5, 8, i % 2 === 0 ? bold : font); x += iw[i]; });
+    row.forEach((v, i) => { box(x, y, iw[i], 15); text(page, clip(String(v ?? ""), i % 2 === 0 ? bold : font, 8, iw[i] - 8), x + 4, y + 4.5, 8, i % 2 === 0 ? bold : font); x += iw[i]; });
   }
   y -= 18;
   text(page, `MONTH: ${monthTitle(sheet.month).toUpperCase()}`, L, y, 10, bold);
@@ -179,7 +215,7 @@ async function pdfMonth(c: PdfCtx, sheet: SheetData) {
     if (v.off) {
       // Holiday / Absent / Excused: bold, centred across the three time columns.
             const spanW = cols.slice(2, spanTo + 1).reduce((t, col) => t + col.w, 0);
-      let t = v.off.toUpperCase();
+      let t = pdfSafe(v.off.toUpperCase(), bold);
       while (t.length > 3 && bold.widthOfTextAtSize(t, offSize) > spanW - 8) t = t.slice(0, -2) + "…";
       text(page, t, xs[2] + (spanW - bold.widthOfTextAtSize(t, offSize)) / 2, y + rowH / 2 - offSize * 0.35, offSize, bold, ink);
     } else { text(page, v.start, xs[2] + 4, mid, fs, font, ink); text(page, v.end, xs[3] + 4, mid, fs, font, ink); text(page, v.hours, xs[4] + 4, mid, fs, font, ink); }
@@ -196,7 +232,7 @@ async function pdfMonth(c: PdfCtx, sheet: SheetData) {
   text(page, "Approved by:", L, y, 9, bold);
   const a = sheet.approval;
   y -= 15;
-  text(page, `STAFF NAME/POSITION: ${a ? `${a.staffName}${a.position ? `/${a.position}` : ""}`.toUpperCase() : "______________________________"}`, L, y, 9);
+  text(page, clip(`STAFF NAME/POSITION: ${a ? `${a.staffName}${a.position ? `/${a.position}` : ""}`.toUpperCase() : "______________________________"}`, font, 9, R - L), L, y, 9);
   y -= 30;
   text(page, "STAFF SIGNATURE:", L, y + 4, 9);
   const asig = a ? await image(a.signatureId, sheet.images) : null;
@@ -205,15 +241,103 @@ async function pdfMonth(c: PdfCtx, sheet: SheetData) {
   if (a) text(page, `Signed ${a.signedAt.toLocaleDateString("en-US")}${sheet.approvalCurrent ? "" : " (rows changed after approval)"}`, L + 270, y + 4, 7);
   y -= 18;
   text(page, "COMMENTS:", L, y, 9);
-  const words = (a?.comments ?? "").split(/\s+/);
-  let line = "", ly = y;
-  for (const w of words) {
-    if (font.widthOfTextAtSize(`${line} ${w}`, 9) > 440) {
-      if (ly - 12 < FOOTER_TOP) { line += " …"; break; }
-      text(page, line, L + 60, ly, 9, font, ink); ly -= 12; line = w;
-    } else line = line ? `${line} ${w}` : w;
+  const lines = wrap(a?.comments ?? "", font, 9, 440);
+  let ly = y;
+  let overflow = false;
+  for (const [i, l] of lines.entries()) {
+    if (ly < FOOTER_TOP + 2) { overflow = true; break; }
+    text(page, i === lines.length - 1 || ly - 12 >= FOOTER_TOP + 2 ? l : `${l} …`, L + 60, ly, 9, font, ink);
+    ly -= 12;
   }
-  if (line) text(page, line, L + 60, ly, 9, font, ink);
+  // Handwritten approval comments: next to the typed ones if they fit, otherwise on the comments page.
+  const aInk = a?.commentsInkId ? await image(a.commentsInkId, sheet.images) : null;
+  let inkOnPage = false;
+  if (aInk) {
+    const room = ly + 8 - FOOTER_TOP;
+    if (room >= 22) {
+      const d = fit(aInk.width, aInk.height, 300, Math.min(60, room));
+      page.drawImage(aInk, { x: L + 60, y: ly + 8 - d.h, width: d.w, height: d.h });
+      inkOnPage = true;
+    }
+  }
+  const comments = sheet.rows.flatMap((r) => (r.entry?.comments ?? []).map((cm) => ({ ...cm, date: r.date })));
+  if (comments.length || (aInk && !inkOnPage) || overflow) {
+    await pdfCommentsPage(c, sheet, comments, aInk && !inkOnPage ? aInk : null, overflow ? a?.comments ?? "" : "");
+  } else if (comments.length === 0 && !overflow) {
+    // nothing more
+  }
+}
+
+/** Fits text into a width, adding "…" if it had to be cut. */
+function clip(t: string, f: PDFFont, size: number, width: number) {
+  let s = pdfSafe(t, f);
+  if (f.widthOfTextAtSize(s, size) <= width) return s;
+  while (s.length > 1 && f.widthOfTextAtSize(`${s}…`, size) > width) s = s.slice(0, -1);
+  return `${s}…`;
+}
+
+/** Splits text into lines that fit `width` (long words are broken). */
+function wrap(t: string, f: PDFFont, size: number, width: number) {
+  const out: string[] = [];
+  let line = "";
+  for (let w of pdfSafe(t, f).split(/\s+/).filter(Boolean)) {
+    while (f.widthOfTextAtSize(w, size) > width) {
+      let cut = w.length - 1;
+      while (cut > 1 && f.widthOfTextAtSize(w.slice(0, cut), size) > width) cut--;
+      if (line) { out.push(line); line = ""; }
+      out.push(w.slice(0, cut));
+      w = w.slice(cut);
+    }
+    const next = line ? `${line} ${w}` : w;
+    if (f.widthOfTextAtSize(next, size) > width) { out.push(line); line = w; } else line = next;
+  }
+  if (line) out.push(line);
+  return out;
+}
+
+/**
+ * The month's comments (typed and handwritten), and approval comments that didn't fit, on their own
+ * page(s) after the sheet.
+ */
+async function pdfCommentsPage(c: PdfCtx, sheet: SheetData, comments: (RowComment & { date: string })[], approvalInk: PDFImage | null, approvalText: string) {
+  const L = 40, R = 572, black = rgb(0.1, 0.12, 0.18), ink = rgb(0.11, 0.25, 0.67), grey = rgb(0.35, 0.38, 0.45);
+  let page = c.doc.addPage([612, 792]);
+  let y = pdfLetterhead(c, page, L, R) - 24;
+  pdfFooter(c, page, L, R);
+  const title = () => {
+    page.drawText(clip(`COMMENTS: ${sheet.student.name}, ${monthTitle(sheet.month)}`, c.bold, 12, R - L), { x: L, y, size: 12, font: c.bold, color: black });
+    y -= 20;
+  };
+  title();
+  const need = (h: number) => {
+    if (y - h >= FOOTER_TOP + 6) return;
+    page = c.doc.addPage([612, 792]);
+    y = pdfLetterhead(c, page, L, R) - 24;
+    pdfFooter(c, page, L, R);
+    title();
+  };
+  const block = async (head: string, body: string, img: PDFImage | null) => {
+    need(14);
+    page.drawText(clip(head, c.bold, 9, R - L), { x: L, y, size: 9, font: c.bold, color: grey });
+    y -= 13;
+    for (const l of wrap(body, c.font, 10, R - L - 12)) {
+      need(13);
+      page.drawText(l, { x: L + 12, y, size: 10, font: c.font, color: ink });
+      y -= 13;
+    }
+    if (img) {
+      const d = fit(img.width, img.height, 360, 110);
+      need(d.h + 4);
+      page.drawImage(img, { x: L + 12, y: y - d.h + 8, width: d.w, height: d.h });
+      y -= d.h + 2;
+    }
+    y -= 8;
+  };
+  if (approvalText || approvalInk) await block(`Approval comments${sheet.approval ? ` (${sheet.approval.staffName})` : ""}`, approvalText, approvalInk);
+  const sorted = [...comments].sort((a, b) => a.date.localeCompare(b.date) || new Date(a.at).getTime() - new Date(b.at).getTime());
+  for (const cm of sorted) {
+    await block(`${usDate(cm.date)}  ${cm.byName}${cm.byRole === "STUDENT" ? " (student)" : ""}, ${new Date(cm.at).toLocaleString("en-US")}`, cm.text, await c.image(cm.inkId, sheet.images));
+  }
 }
 
 // ---------- Word (DOCX) ----------
@@ -332,6 +456,19 @@ export async function buildDocx(report: Report): Promise<Buffer> {
     children.push(new Paragraph({ children: [new TextRun({ text: `STAFF NAME/POSITION: ${a ? `${a.staffName}${a.position ? `/${a.position}` : ""}`.toUpperCase() : "______________________"}` })] }));
     children.push(new Paragraph({ children: [new TextRun({ text: "STAFF SIGNATURE: " }), ...(a ? sigRun(a.signatureId, sheet.images, 160, 40) : [new TextRun("______________________")])] }));
     children.push(new Paragraph({ children: [new TextRun({ text: `COMMENTS: ${a?.comments ?? ""}` })] }));
+    if (a?.commentsInkId) children.push(new Paragraph({ children: sigRun(a.commentsInkId, sheet.images, 320, 90) }));
+    const comments = sheet.rows.flatMap((r) => (r.entry?.comments ?? []).map((cm) => ({ ...cm, date: r.date })))
+      .sort((x, y) => x.date.localeCompare(y.date) || new Date(x.at).getTime() - new Date(y.at).getTime());
+    if (comments.length) {
+      children.push(new Paragraph({ spacing: { before: 240 }, children: [new TextRun({ text: "Comments on days", bold: true })] }));
+      for (const cm of comments) {
+        children.push(new Paragraph({ spacing: { before: 80 }, children: [
+          new TextRun({ text: `${usDate(cm.date)}  ${cm.byName}${cm.byRole === "STUDENT" ? " (student)" : ""}: `, bold: true, size: 17 }),
+          new TextRun({ text: cm.text, size: 17, color: "1C3FAA" }),
+        ] }));
+        if (cm.inkId) children.push(new Paragraph({ children: sigRun(cm.inkId, sheet.images, 300, 80) }));
+      }
+    }
     if (a && !sheet.approvalCurrent) children.push(new Paragraph({ children: [new TextRun({ text: "Note: rows changed after this month was approved.", italics: true })] }));
   });
   const doc = new Document({
@@ -346,4 +483,65 @@ export async function buildDocx(report: Report): Promise<Buffer> {
     }],
   });
   return Packer.toBuffer(doc);
+}
+
+// ---------- Monthly report for a class (one row per student) ----------
+
+export type SummaryRow = {
+  name: string; course: string; status: string; summary: AttendanceSummary; approved: "current" | "outdated" | null;
+};
+
+/** One month, many students: attendance, hours and approval for each, on landscape pages. */
+export async function buildMonthSummaryPdf(month: string, course: string, rows: SummaryRow[]): Promise<Uint8Array> {
+  const title = `Monthly attendance report: ${monthTitle(month)}${course ? `, ${course}` : ""}`;
+  const c = await pdfContext(title);
+  const W = 792, L = 40, R = W - 40, black = rgb(0.1, 0.12, 0.18);
+  const colors = { good: rgb(0.12, 0.62, 0.33), attention: rgb(0.94, 0.55, 0), poor: rgb(0.85, 0.18, 0.13), none: rgb(0.67, 0.7, 0.75) };
+  const cols = [
+    { t: "Student", w: 170 }, { t: "Class", w: 150 }, { t: "Status", w: 66 }, { t: "Class days", w: 50 }, { t: "Present", w: 46 },
+    { t: "Absent", w: 46 }, { t: "Excused", w: 46 }, { t: "Hours", w: 46 }, { t: "Attendance", w: 92 }, { t: "Approved", w: 0 },
+  ];
+  cols[cols.length - 1].w = R - L - cols.slice(0, -1).reduce((t, x) => t + x.w, 0);
+  const totals = { present: 0, absent: 0, excused: 0, minutes: 0 };
+  let page: PDFPage, y = 0;
+  const newPage = () => {
+    page = c.doc.addPage([W, 612]); // US Letter, landscape
+    y = pdfLetterhead(c, page, L, R, LANDSCAPE_TOP) - 22;
+    pdfFooter(c, page, L, R);
+    page.drawText(pdfSafe(title.toUpperCase(), c.bold), { x: L, y, size: 12, font: c.bold, color: black });
+    y -= 22;
+    let x = L;
+    for (const col of cols) {
+      page.drawRectangle({ x, y, width: col.w, height: 18, color: rgb(0.965, 0.973, 0.984), borderWidth: 0.6, borderColor: black });
+      page.drawText(col.t, { x: x + 4, y: y + 6, size: 8, font: c.bold, color: black });
+      x += col.w;
+    }
+  };
+  newPage();
+  for (const r of rows) {
+    if (y - 18 < FOOTER_TOP + 30) newPage();
+    y -= 17;
+    const sm = r.summary;
+    totals.present += sm.present; totals.absent += sm.absent + sm.missing; totals.excused += sm.excused; totals.minutes += sm.minutes;
+    const vals = [
+      r.name, r.course, r.status, String(sm.classDays - sm.holidays), String(sm.present),
+      String(sm.absent + sm.missing), String(sm.excused), hoursText(sm.minutes) || "0",
+      sm.rate === null ? "-" : `${sm.rate}%`, r.approved === "current" ? "Yes" : r.approved === "outdated" ? "Changed since" : "No",
+    ];
+    let x = L;
+    vals.forEach((v, i) => {
+      page.drawRectangle({ x, y, width: cols[i].w, height: 17, borderWidth: 0.4, borderColor: rgb(0.6, 0.63, 0.7) });
+      const dx = i === 8 ? 16 : 4;
+      if (i === 8) page.drawCircle({ x: x + 8, y: y + 8.5, size: 4, color: colors[sm.level] });
+      page.drawText(clip(v, c.font, 8.5, cols[i].w - dx - 4), { x: x + dx, y: y + 5.5, size: 8.5, font: c.font, color: black });
+      x += cols[i].w;
+    });
+  }
+  if (!rows.length) { y -= 20; page!.drawText("Nobody in this class had class days this month.", { x: L, y, size: 10, font: c.font }); }
+  y -= 26;
+  if (y < FOOTER_TOP + 30) { newPage(); y -= 20; }
+  page!.drawText(pdfSafe(`${rows.length} students. Present ${totals.present} days, absent ${totals.absent} (including days not recorded), excused ${totals.excused}. ${hoursText(totals.minutes) || "0"} hours in total.`, c.font), { x: L, y, size: 9, font: c.font, color: black });
+  y -= 13;
+  page!.drawText(pdfSafe(`Colours: green ${LEVEL_WORDS.good.toLowerCase()}, orange ${LEVEL_WORDS.attention.toLowerCase()}, red ${LEVEL_WORDS.poor.toLowerCase()}. Holidays and excused days don't count against a student.`, c.font), { x: L, y, size: 8, font: c.font, color: rgb(0.35, 0.38, 0.45) });
+  return c.doc.save();
 }
