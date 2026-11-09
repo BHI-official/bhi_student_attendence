@@ -43,6 +43,8 @@ function rowCells(r: SheetData["rows"][number]) {
     start: off ? "" : time12(e?.startTime ?? null), end: off ? "" : time12(e?.endTime ?? null), hours: off ? "" : hoursText(e?.minutes),
     // Holidays carry no signatures, even if one was added before this rule.
     studentSig: holidayRow ? null : e?.studentSignature?.id ?? null, staffSig: holidayRow ? null : e?.staffSignature?.id ?? null,
+    // The student's handwritten time, printed in place of the typed one when there is one.
+    startInk: off || !e?.startTime ? null : e.startInkId ?? null, endInk: off || !e?.endTime ? null : e.endInkId ?? null,
   };
 }
 
@@ -218,7 +220,14 @@ async function pdfMonth(c: PdfCtx, sheet: SheetData) {
       let t = pdfSafe(v.off.toUpperCase(), bold);
       while (t.length > 3 && bold.widthOfTextAtSize(t, offSize) > spanW - 8) t = t.slice(0, -2) + "…";
       text(page, t, xs[2] + (spanW - bold.widthOfTextAtSize(t, offSize)) / 2, y + rowH / 2 - offSize * 0.35, offSize, bold, ink);
-    } else { text(page, v.start, xs[2] + 4, mid, fs, font, ink); text(page, v.end, xs[3] + 4, mid, fs, font, ink); text(page, v.hours, xs[4] + 4, mid, fs, font, ink); }
+    } else {
+      for (const [i, value, inkId] of [[2, v.start, v.startInk], [3, v.end, v.endInk]] as const) {
+        const img = await image(inkId, sheet.images);
+        if (img) { const d = fit(img.width, img.height, cols[i].w - 6, rowH - 3); page.drawImage(img, { x: xs[i] + 3, y: y + (rowH - d.h) / 2, width: d.w, height: d.h }); }
+        else text(page, value, xs[i] + 4, mid, fs, font, ink);
+      }
+      text(page, v.hours, xs[4] + 4, mid, fs, font, ink);
+    }
     for (const [i, id] of [[5, v.studentSig], [6, v.staffSig]] as const) {
       const img = await image(id, sheet.images);
       if (img) { const d = fit(img.width, img.height, cols[i].w - 8, rowH - 3); page.drawImage(img, { x: xs[i] + (cols[i].w - d.w) / 2, y: y + (rowH - d.h) / 2, width: d.w, height: d.h }); }
@@ -446,7 +455,11 @@ export async function buildDocx(report: Report): Promise<Buffer> {
       if (v.holiday) return new TableRow({ children: [...first, cell((v.off ?? "Holiday").toUpperCase(), { span: 5, ink: true, bold: true, center: true, size: 20, width: widths[2] + widths[3] + widths[4] + widths[5] + widths[6] })] });
       const mid = v.off
         ? [cell(v.off.toUpperCase(), { span: 3, ink: true, bold: true, center: true, size: 20, width: widths[2] + widths[3] + widths[4] })]
-        : [cell(v.start, { width: widths[2], ink: true, size: 18 }), cell(v.end, { width: widths[3], ink: true, size: 18 }), cell(v.hours, { width: widths[4], ink: true, size: 18 })];
+        : [
+          v.startInk && sheet.images[v.startInk] ? cell(sigRun(v.startInk, sheet.images, 70, 17), { width: widths[2] }) : cell(v.start, { width: widths[2], ink: true, size: 18 }),
+          v.endInk && sheet.images[v.endInk] ? cell(sigRun(v.endInk, sheet.images, 70, 17), { width: widths[3] }) : cell(v.end, { width: widths[3], ink: true, size: 18 }),
+          cell(v.hours, { width: widths[4], ink: true, size: 18 }),
+        ];
       return new TableRow({ children: [...first, ...mid, cell(sigRun(v.studentSig, sheet.images, 90, 17), { width: widths[5] }), cell(sigRun(v.staffSig, sheet.images, 90, 17), { width: widths[6] })] });
     });
     const total = new TableRow({ children: [cell("TOTAL HOURS", { span: 4, bold: true, width: widths[0] + widths[1] + widths[2] + widths[3] }), cell(hoursText(sheet.totalMinutes) || "0", { bold: true, ink: true, width: widths[4] }), cell("", { span: 2, width: widths[5] + widths[6] })] });

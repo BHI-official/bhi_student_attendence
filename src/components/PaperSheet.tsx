@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import type { ActionState } from "@/lib/action";
 import type { Entry, MonthApproval, Student } from "@/lib/types";
 import { LATE_ENTRY_FLAG_MINUTES, clockIn, hoursText, monthTitle, time12, toMinutes, usDate, type SheetRow } from "@/lib/sheet";
-import { studentCommentAction, studentFillAction, studentSignRowAction, studentStartAction } from "@/actions/student";
+import { studentCommentAction, studentFillAction, studentRewriteTimeAction, studentSignRowAction, studentStartAction } from "@/actions/student";
 import { addCommentAction, approveMonthAction, editRowAction, fillStudentSignatureAction, fillStudentSignaturesAction, replaceRowSignatureAction, saveMySignatureAction, signRowsAction } from "@/actions/staff";
 import { setStudentSignatureAction } from "@/actions/admin";
 import { SignatureOnFile } from "./SignatureCapture";
@@ -61,6 +61,8 @@ export function PaperSheet(p: Props) {
   const [evidence, setEvidence] = useState(false);
   const [editing, setEditing] = useState<SheetRow | null>(null);
   const [typing, setTyping] = useState<"start" | "end" | null>(null);
+  /** Student: writing a saved time again (today, before staff sign). */
+  const [rewriting, setRewriting] = useState<"start" | "end" | null>(null);
   const [withStudent, setWithStudent] = useState(true);
   /** A handwriting pad open for: signing rows as staff, or the student signing one of their days. */
   const [handFor, setHandFor] = useState<{ who: "staff"; keys: string[]; fromSelection: boolean } | { who: "student"; date: string } | null>(null);
@@ -87,6 +89,8 @@ export function PaperSheet(p: Props) {
     if (col === "end" && e?.startTime && !e.endTime) return <button className="fill go" disabled={pending} onClick={() => setTyping("end")}>Enter end time</button>;
     return null;
   };
+  /** Student: their own time today can be written again until staff sign the row. */
+  const canRewrite = (r: SheetRow) => !staff && r.isToday && !r.holiday && !!p.clock && !!r.entry && r.entry.status === "PRESENT" && !r.entry.staffSignature;
   /** Student: a day of theirs with both times but no signature yet, still open, not yet validated by staff. */
   const studentCanSign = (r: SheetRow) => !staff && !r.isFuture && !locked(r) && !r.holiday && !!r.entry && r.entry.status === "PRESENT"
     && !!r.entry.startTime && !!r.entry.endTime && !r.entry.studentSignature && !r.entry.staffSignature;
@@ -131,9 +135,21 @@ export function PaperSheet(p: Props) {
   const timeCell = (r: SheetRow, which: "startTime" | "endTime") => {
     const e = r.entry;
     const t = e?.[which];
+    // The student's own handwriting when they wrote it; otherwise (older rows, staff corrections) the time itself.
+    const inkId = which === "startTime" ? e?.startInkId : e?.endInkId;
+    const ink = inkId ? p.images[inkId] : null;
     if (t) return (
       <>
-        <span className="hand">{time12(t).replace(" ", "")}</span>
+        {ink
+          ? <img className="timeink" src={ink} alt={`${which === "startTime" ? "Start" : "End"} time, handwritten. School clock: ${time12(t)}`} title={`School clock: ${time12(t)}`} />
+          : <span className="hand">{time12(t).replace(" ", "")}</span>}
+        {ink && (staff || evidence) && <span className="small muted no-print" style={{ display: "block" }}>clock {time12(t)}</span>}
+        {staff && ink && e!.history?.some((h) => h.what.startsWith(`rewrote ${which === "startTime" ? "start" : "end"}`)) && (
+          <span className="tag no-print" style={{ display: "block", marginTop: 2 }} title="The student wrote this time again after saving it. The earlier handwriting is in the audit log.">rewritten</span>
+        )}
+        {canRewrite(r) && (
+          <button type="button" className="linkbtn small no-print" disabled={pending} onClick={() => setRewriting(which === "startTime" ? "start" : "end")}>Write again</button>
+        )}
         {evidence && <span className="small muted" style={{ display: "block" }}>{saved(e!, which)}</span>}
         {staff && !evidence && (late(e!, which) ?? 0) >= LATE_ENTRY_FLAG_MINUTES && (
           <span className="tag warn no-print" style={{ display: "block", marginTop: 2 }} title={saved(e!, which)}>entered {late(e!, which)} min later</span>
@@ -310,6 +326,21 @@ export function PaperSheet(p: Props) {
           onDone={(r) => { setTyping(null); setMsg(r); router.refresh(); }}
         />
       )}
+      {rewriting && p.clock && todayRow?.entry && (() => {
+        const e = todayRow.entry;
+        const time = rewriting === "start" ? e.startTime : e.endTime;
+        const inkId = rewriting === "start" ? e.startInkId : e.endInkId;
+        if (!time) return null;
+        return (
+          <TimeEntry
+            kind={rewriting} clock={p.clock}
+            rewrite={{ time, ink: inkId ? p.images[inkId] ?? null : null }}
+            action={(prev, fd) => studentRewriteTimeAction(rewriting, prev, fd)}
+            onCancel={() => setRewriting(null)}
+            onDone={(r) => { setRewriting(null); setMsg(r); router.refresh(); }}
+          />
+        );
+      })()}
       {editing && <EditRow studentId={s._id} row={editing} locked={locked(editing)} onClose={() => { setEditing(null); router.refresh(); }} />}
       {commentsFor && (
         <CommentsDialog

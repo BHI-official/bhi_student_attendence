@@ -14,15 +14,20 @@ import { createPortal } from "react-dom";
  * can be undone and redone stroke by stroke, and reopening the field continues the same drawing.
  */
 
-export type InkKind = "signature" | "note";
+export type InkKind = "signature" | "note" | "time";
 type Pt = { x: number; y: number; p: number };
 /** Points are in a fixed coordinate space: x and y are measured in thousandths of the pad's width. */
-type Stroke = Pt[];
+export type Stroke = Pt[];
 export type InkValue = { png: string; strokes: Stroke[] } | null;
 
 const INK = "#1c3faa";
 /** Output size limits; the server checks the same limits (src/lib/png.ts). */
-const OUT = { signature: { maxW: 480, maxH: 160, minW: 40, minH: 15 }, note: { maxW: 1200, maxH: 600, minW: 30, minH: 15 } } as const;
+const OUT = {
+  signature: { maxW: 480, maxH: 160, minW: 40, minH: 15 },
+  note: { maxW: 1200, maxH: 600, minW: 30, minH: 15 },
+  /** A handwritten start or end time ("9:00"): a short strip, like a signature. */
+  time: { maxW: 480, maxH: 200, minW: 40, minH: 15 },
+} as const;
 
 function drawStrokes(ctx: CanvasRenderingContext2D, strokes: Stroke[], scale: number) {
   ctx.lineCap = "round";
@@ -62,7 +67,7 @@ function drawStroke(ctx: CanvasRenderingContext2D, s: Stroke, scale: number, fro
 }
 
 /** Crops the drawing to the ink, adds a margin and scales it to fit the output limits. */
-function exportPng(strokes: Stroke[], kind: InkKind): string | null {
+export function exportPng(strokes: Stroke[], kind: InkKind): string | null {
   const pts = strokes.flat();
   if (!pts.length) return null;
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
@@ -84,7 +89,7 @@ function exportPng(strokes: Stroke[], kind: InkKind): string | null {
 }
 
 /** Has the person actually written something (not a stray tap)? */
-function inkExtent(strokes: Stroke[]) {
+export function inkExtent(strokes: Stroke[]) {
   const pts = strokes.flat();
   if (!pts.length) return 0;
   const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
@@ -92,25 +97,22 @@ function inkExtent(strokes: Stroke[]) {
 }
 
 /**
- * The enlarged writing area. Covers the screen so writing with a finger is easy, and keeps the page
- * underneath from scrolling. When a stylus is in use, touches from the hand resting on the screen
- * are ignored.
+ * The drawing surface on its own: finger, stylus or mouse, smoothed strokes, palm rejection.
+ * The strokes live with the parent (so it can undo, clear and export); each finished stroke is
+ * handed back through onStroke. Used inside the enlarged pad, and inline where a small writing
+ * area belongs right on the form (the handwritten start / end time).
  */
-export function InkPad({ kind, title, hint, initial, onDone, onCancel, doneLabel }: {
-  kind: InkKind; title: string; hint?: string; initial?: Stroke[];
-  onDone: (v: InkValue) => void; onCancel: () => void; doneLabel?: string;
+export function InkCanvas({ strokes, onStroke, label, className }: {
+  strokes: Stroke[]; onStroke: (s: Stroke) => void; label: string; className?: string;
 }) {
   const canvas = useRef<HTMLCanvasElement>(null);
-  const box = useRef<HTMLDivElement>(null);
-  const [strokes, setStrokes] = useState<Stroke[]>(() => initial ?? []);
-  const [undone, setUndone] = useState<Stroke[]>([]);
-  const [tooSmall, setTooSmall] = useState(false);
   const live = useRef<{ id: number; stroke: Stroke } | null>(null);
   const penSeen = useRef(false);
   const scale = useRef(1); // CSS px per drawing unit
   const strokesRef = useRef(strokes);
   strokesRef.current = strokes;
-  const titleId = useId();
+  const onStrokeRef = useRef(onStroke);
+  onStrokeRef.current = onStroke;
 
   const redraw = useCallback(() => {
     const c = canvas.current;
@@ -143,23 +145,6 @@ export function InkPad({ kind, title, hint, initial, onDone, onCancel, doneLabel
 
   useEffect(() => { redraw(); }, [strokes, redraw]);
 
-  // Lock page scroll, close on Escape, undo / redo from the keyboard, focus inside the dialog.
-  useEffect(() => {
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    const prevFocus = document.activeElement as HTMLElement | null;
-    box.current?.focus();
-    const key = (e: KeyboardEvent) => {
-      if (e.key === "Escape") { e.preventDefault(); onCancel(); }
-      const mod = e.ctrlKey || e.metaKey;
-      if (mod && e.key.toLowerCase() === "z" && !e.shiftKey) { e.preventDefault(); undo(); }
-      if (mod && (e.key.toLowerCase() === "y" || (e.key.toLowerCase() === "z" && e.shiftKey))) { e.preventDefault(); redo(); }
-    };
-    window.addEventListener("keydown", key);
-    return () => { window.removeEventListener("keydown", key); document.body.style.overflow = prevOverflow; prevFocus?.focus?.(); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onCancel]);
-
   const point = (e: PointerEvent | React.PointerEvent): Pt => {
     const r = canvas.current!.getBoundingClientRect();
     // Mice and fingers report 0 or 0.5; only a stylus gives real pressure.
@@ -175,7 +160,6 @@ export function InkPad({ kind, title, hint, initial, onDone, onCancel, doneLabel
     e.preventDefault();
     canvas.current!.setPointerCapture(e.pointerId);
     live.current = { id: e.pointerId, stroke: [point(e)] };
-    setTooSmall(false);
     redraw();
   };
   const move = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -198,9 +182,52 @@ export function InkPad({ kind, title, hint, initial, onDone, onCancel, doneLabel
     const l = live.current;
     if (!l || l.id !== e.pointerId) return;
     live.current = null;
-    setStrokes((s) => [...s, l.stroke]);
-    setUndone([]);
+    onStrokeRef.current(l.stroke);
   };
+
+  return (
+    <canvas
+      ref={canvas} className={className}
+      onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up}
+      onContextMenu={(e) => e.preventDefault()}
+      role="img" aria-label={label}
+    />
+  );
+}
+
+/**
+ * The enlarged writing area. Covers the screen so writing with a finger is easy, and keeps the page
+ * underneath from scrolling. When a stylus is in use, touches from the hand resting on the screen
+ * are ignored.
+ */
+export function InkPad({ kind, title, hint, initial, onDone, onCancel, doneLabel }: {
+  kind: InkKind; title: string; hint?: string; initial?: Stroke[];
+  onDone: (v: InkValue) => void; onCancel: () => void; doneLabel?: string;
+}) {
+  const box = useRef<HTMLDivElement>(null);
+  const [strokes, setStrokes] = useState<Stroke[]>(() => initial ?? []);
+  const [undone, setUndone] = useState<Stroke[]>([]);
+  const [tooSmall, setTooSmall] = useState(false);
+  const strokesRef = useRef(strokes);
+  strokesRef.current = strokes;
+  const titleId = useId();
+
+  // Lock page scroll, close on Escape, undo / redo from the keyboard, focus inside the dialog.
+  useEffect(() => {
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const prevFocus = document.activeElement as HTMLElement | null;
+    box.current?.focus();
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { e.preventDefault(); onCancel(); }
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && e.key.toLowerCase() === "z" && !e.shiftKey) { e.preventDefault(); undo(); }
+      if (mod && (e.key.toLowerCase() === "y" || (e.key.toLowerCase() === "z" && e.shiftKey))) { e.preventDefault(); redo(); }
+    };
+    window.addEventListener("keydown", key);
+    return () => { window.removeEventListener("keydown", key); document.body.style.overflow = prevOverflow; prevFocus?.focus?.(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onCancel]);
 
   // Undo / redo read the current lists from refs, so the keyboard shortcuts never see stale state.
   const undoneRef = useRef(undone);
@@ -237,12 +264,10 @@ export function InkPad({ kind, title, hint, initial, onDone, onCancel, doneLabel
           {hint && <p>{hint}</p>}
         </header>
         <div className="inkarea">
-          <canvas
-            ref={canvas}
-            onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up}
-            onContextMenu={(e) => e.preventDefault()}
-            role="img"
-            aria-label={kind === "signature" ? "Signature area. Write your signature with your finger, a stylus or the mouse." : "Writing area. Write with your finger, a stylus or the mouse."}
+          <InkCanvas
+            strokes={strokes}
+            onStroke={(st) => { setStrokes((s) => [...s, st]); setUndone([]); setTooSmall(false); }}
+            label={kind === "signature" ? "Signature area. Write your signature with your finger, a stylus or the mouse." : "Writing area. Write with your finger, a stylus or the mouse."}
           />
           {kind === "signature" && <span className="inkline" aria-hidden><span>✕</span></span>}
           {empty && <span className="inkempty" aria-hidden>{kind === "signature" ? "Sign here" : "Write here"}</span>}

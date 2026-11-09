@@ -215,20 +215,27 @@ test("end of day: the student must sign by hand; the signature is stored and kep
   } as any);
   await asStudent(kevin!._id);
   const nowTime = sheet.clockIn("America/New_York", new Date(), "end");
-  let r = await ST.studentFillAction({}, fd({ time: nowTime }));
+  // The end time is written by hand; without the handwriting nothing is saved.
+  let r = await ST.studentFillAction({}, fd({ signature: SIG }));
+  assert.match(r.error ?? "", /Write the time in the box/);
+  r = await ST.studentFillAction({}, fd({ timeInk: SIG }));
   assert.match(r.error ?? "", /Sign in the box/);
-  r = await ST.studentFillAction({}, fd({ time: nowTime, signature: "data:image/png;base64,AAAA" }));
+  r = await ST.studentFillAction({}, fd({ timeInk: SIG, signature: "data:image/png;base64,AAAA" }));
   assert.ok(r.error);
-  r = await ST.studentFillAction({}, fd({ time: nowTime, signature: SIG }));
+  // A typed time is ignored: the server records its own clock with the handwriting.
+  r = await ST.studentFillAction({}, fd({ time: "23:59", timeInk: SIG, signature: SIG }));
   assert.ok(r.ok, JSON.stringify(r));
   const e = await db.collection("entries").findOne({ _id: `${kevin!._id}:${today}` as any });
   assert.equal(e!.endTime, nowTime);
+  const timeInk = await db.collection("signatures").findOne({ _id: e!.endInkId });
+  assert.equal(timeInk!.kind, "TIME");
+  assert.equal(timeInk!.ownerId, kevin!._id);
   const sig = await db.collection("signatures").findOne({ _id: e!.studentSignature.id });
   assert.equal(sig!.source, "DRAWN");
   assert.equal(sig!.ownerId, kevin!._id);
   assert.equal((await studentByName("Kevin Reid"))!.signatureId, sig!._id, "first handwritten signature is kept on file");
   // Filling again doesn't write twice.
-  r = await ST.studentFillAction({}, fd({ time: nowTime, signature: SIG }));
+  r = await ST.studentFillAction({}, fd({ timeInk: SIG, signature: SIG }));
   assert.match(r.message ?? "", /already filled/);
 });
 
@@ -381,7 +388,7 @@ test("a class day off: teachers mark their own classes with a note; a student ca
   r = await S.markCourseDayAction({}, fd({ date: today, course: "Night", status: "HOLIDAY", note: "Room flooded" }));
   assert.ok(r.ok, JSON.stringify(r));
   await asStudent(lukasz!._id);
-  r = await ST.studentStartAction({}, fd({ time: sheet.clockIn("America/New_York", new Date(), "end") }));
+  r = await ST.studentStartAction({}, fd({ timeInk: SIG }));
   assert.match(r.error ?? "", /holiday for your class \(Room flooded\)/);
   // An Excused row someone recorded by hand is not removed by "Remove".
   await asStaff(ids.admin);

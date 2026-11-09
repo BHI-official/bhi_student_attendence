@@ -6,6 +6,8 @@ import { checkInkPng } from "./png";
 export const checkSignaturePng = (input: unknown) => checkInkPng(input, "SIGNATURE");
 /** Handwriting written into a note or comment field. */
 export const checkNotePng = (input: unknown) => checkInkPng(input, "NOTE");
+/** A start or end time the student wrote by hand. */
+export const checkTimePng = (input: unknown) => checkInkPng(input, "TIME");
 
 /**
  * Stores a signature or handwriting image once. Images are never deleted or changed: rows point

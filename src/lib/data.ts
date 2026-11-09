@@ -36,7 +36,7 @@ export async function loadSheet(studentId: string, month: string) {
   ]);
   const rows = sheetRows(student, month, list, holidays, today());
   const images = await signatureImages([
-    ...list.flatMap((e) => [e.studentSignature?.id, e.staffSignature?.id, ...(e.comments ?? []).map((c) => c.inkId)]),
+    ...list.flatMap((e) => [e.studentSignature?.id, e.staffSignature?.id, e.startInkId, e.endInkId, ...(e.comments ?? []).map((c) => c.inkId)]),
     approval?.signatureId, approval?.commentsInkId,
   ]);
   return {

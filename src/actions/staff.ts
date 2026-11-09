@@ -273,8 +273,9 @@ export async function editRowAction(studentId: string, date: string, _: ActionSt
       $set: {
         ...after, staffSignature: null, updatedAt: now,
         // A time written by staff wasn't typed late by the student, so its late-entry flag goes.
-        ...(before?.startTime !== after.startTime ? { startLateBy: null } : {}),
-        ...(before?.endTime !== after.endTime ? { endLateBy: null } : {}),
+        // The student's handwritten time no longer matches either, so the sheet shows staff's time.
+        ...(before?.startTime !== after.startTime ? { startLateBy: null, startInkId: null } : {}),
+        ...(before?.endTime !== after.endTime ? { endLateBy: null, endInkId: null } : {}),
       },
       $setOnInsert: { studentId, date, startAt: null, endAt: null, studentSignature: null, comments: [] },
       $push: { history: { at: now, byId: staff._id, byName: staff.name, what, reason: reason || "filled in by staff" } },

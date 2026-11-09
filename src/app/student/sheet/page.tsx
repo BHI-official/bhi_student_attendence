@@ -24,8 +24,8 @@ export default async function MySheet({ searchParams }: { searchParams: Promise<
   const hint = !todayRow ? null
     : todayRow.holiday ? `Today is a holiday (${todayRow.holiday}).`
     : e && e.status !== "PRESENT" ? `Today is marked ${e.status.toLowerCase()}. Ask a staff member if that's wrong.`
-    : !e?.startTime ? "Today: tap “Enter start time” when you arrive and type the time you got here."
-    : !e.endTime ? "Today: when class is over, tap “Enter end time”, type the time you left and sign."
+    : !e?.startTime ? "Today: tap “Enter start time” when you arrive and write the time by hand."
+    : !e.endTime ? "Today: when class is over, tap “Enter end time”, write the time by hand and sign."
     : "You're done for today.";
   return (
     <main className="wrap" style={{ maxWidth: 1040 }}>

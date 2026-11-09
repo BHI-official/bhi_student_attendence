@@ -67,8 +67,11 @@ export type SignatureDoc = {
   ownerId: string;
   png: string; // data:image/png;base64,...
   source: "UPLOAD" | "DRAWN";
-  /** A signature, or handwriting written into a note / comment field. Missing = signature. */
-  kind?: "SIGNATURE" | "NOTE";
+  /**
+   * A signature, handwriting written into a note / comment field, or a start / end time the
+   * student wrote by hand. Missing = signature.
+   */
+  kind?: "SIGNATURE" | "NOTE" | "TIME";
   createdAt: Date;
   createdBy: string; // who put it on file (the person, or the staff member who uploaded it for them)
 };
@@ -107,6 +110,14 @@ export type Entry = {
   endAt: Date | null; // exact server time the student saved their end time
   startTime: string | null; // HH:MM shown on the sheet (typed by the student, checked by the server)
   endTime: string | null;
+  /**
+   * The start / end time as the student wrote it by hand (a SignatureDoc of kind TIME). This is
+   * what the sheet shows, like the paper. startTime / endTime hold the school clock's reading at
+   * that moment, which the hours are worked out from. Cleared when staff correct the time;
+   * missing on rows from before handwritten times.
+   */
+  startInkId?: string | null;
+  endInkId?: string | null;
   /**
    * How many minutes before saving the typed time was (0 = typed "now"). Lets staff see rows
    * entered after the fact. null when staff wrote the time, or for rows from before typed times.
