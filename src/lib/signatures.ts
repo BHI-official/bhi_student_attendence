@@ -2,7 +2,7 @@ import "server-only";
 import { cols, newId, type SignatureDoc } from "./db";
 import { checkInkPng } from "./png";
 
-/** A signature image from the browser (photo cleaned up, or drawn). Returns the data URL, or a message. */
+/** A handwritten signature image from the browser's canvas. Returns the data URL, or a message. */
 export const checkSignaturePng = (input: unknown) => checkInkPng(input, "SIGNATURE");
 /** Handwriting written into a note or comment field. */
 export const checkNotePng = (input: unknown) => checkInkPng(input, "NOTE");

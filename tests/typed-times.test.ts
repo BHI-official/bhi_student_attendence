@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DEFAULT_TIME_RULES as R, checkTypedTime, parseTime } from "../src/lib/sheet";
+import { DEFAULT_TIME_RULES as R, checkPastDayTimes, checkTypedTime, parseTime } from "../src/lib/sheet";
 
 const at = (hh: number, mm: number) => hh * 60 + mm; // school clock, minutes since midnight
 const err = (c: ReturnType<typeof checkTypedTime>) => (c.ok ? "" : c.error);
@@ -50,4 +50,21 @@ test("a window of 0 means students can only enter the current minute", () => {
   const strict = { ...R, windowMinutes: 0 };
   assert.equal(checkTypedTime("start", "09:12", at(9, 12), strict).ok, true);
   assert.equal(checkTypedTime("start", "09:11", at(9, 12), strict).ok, false);
+});
+
+// ---------- A past day the student fills in later ----------
+
+test("past day: readable times, end after start, sensible length", () => {
+  const rules = { minMinutes: 5, maxMinutes: 720 };
+  const ok = checkPastDayTimes("09:00", "14:30", rules);
+  assert.deepEqual(ok, { ok: true, start: "09:00", end: "14:30", minutes: 330 });
+  assert.equal((checkPastDayTimes("9:05 am", "2:30 pm", rules) as { minutes: number }).minutes, 325);
+  const bad = (a: string, b: string) => checkPastDayTimes(a, b, rules) as { ok: false; field: string; error: string };
+  assert.equal(bad("", "14:00").field, "startTime");
+  assert.equal(bad("09:00", "nope").field, "endTime");
+  // 9:00 to 1:00 is most likely 1:00 pm.
+  assert.match(bad("09:00", "01:00").error, /Did you mean 1:00 pm/);
+  assert.match(bad("14:00", "13:00").error, /after your start time/);
+  assert.match(bad("09:00", "09:03").error, /only 3 minutes/);
+  assert.match(bad("06:00", "19:00").error, /more than 12 hours/);
 });

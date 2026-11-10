@@ -49,7 +49,7 @@ async function main() {
       _id: randomUUID() as never, name, email, position: "Admin", role: "ADMIN", courses: [], passwordHash: await bcrypt.hash(password, 12),
       signatureId: null, active: true, createdAt: new Date(),
     });
-    console.log(`Admin created: ${email}. Sign in at /staff/login.`);
+    console.log(`Admin created: ${email}. Sign in at /admin/login.`);
   }
   await client.close();
 }

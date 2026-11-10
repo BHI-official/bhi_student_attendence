@@ -5,7 +5,7 @@ import { redirect } from "next/navigation";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
 import { EMPTY_PROFILE, audit, cols, isDuplicateKey, newId, type Student, type StudentProfile } from "@/lib/db";
-import { requireStaff } from "@/lib/auth";
+import { requireAdmin } from "@/lib/auth";
 import { canSee } from "@/lib/access";
 import { checkSignaturePng, saveSignature } from "@/lib/signatures";
 import { DATE_RE, parseDate, parseStudentsCsv, type StudentInput } from "@/lib/sheet";
@@ -13,7 +13,7 @@ import { PIN_RE, weakPin } from "@/lib/pin";
 import { freePin, pinKey, pinTaken } from "@/lib/pins";
 import type { ActionState } from "@/lib/action";
 
-const refresh = () => { revalidatePath("/staff", "layout"); revalidatePath("/student", "layout"); };
+const refresh = () => { revalidatePath("/admin", "layout"); revalidatePath("/teacher", "layout"); revalidatePath("/student", "layout"); };
 /** Checks a PIN typed by staff. Returns a message, or null if it can be used. */
 async function typedPinProblem(pin: string, exceptStudentId?: string) {
   if (!PIN_RE.test(pin)) return "4 to 6 digits";
@@ -46,7 +46,7 @@ function studentFields(fd: FormData): { value?: Omit<StudentInput, "pin"> & { cl
 
 /** Add or edit one student. A new student gets the PIN typed in, or a random 4-digit PIN shown once. */
 export async function saveStudentAction(studentId: string | null, _: ActionState, fd: FormData): Promise<ActionState> {
-  const staff = await requireStaff("ADMIN");
+  const staff = await requireAdmin();
   const f = studentFields(fd);
   if (!f.value) return { fieldErrors: f.errors };
   const { students } = await cols();
@@ -83,7 +83,7 @@ export async function saveStudentAction(studentId: string | null, _: ActionState
  * row has a problem, so a file is never half-imported. Returns each new student's PIN once.
  */
 export async function importStudentsAction(_: ActionState, fd: FormData): Promise<ActionState> {
-  const staff = await requireStaff("ADMIN");
+  const staff = await requireAdmin();
   const file = fd.get("file");
   if (!(file instanceof File) || !file.size) return { error: "Choose a CSV file." };
   if (file.size > 2_000_000) return { error: "The file is too big (2 MB max)." };
@@ -143,7 +143,7 @@ export async function importStudentsAction(_: ActionState, fd: FormData): Promis
  * The admin can type one, or leave it empty for a random one. Shown once.
  */
 export async function resetPinAction(studentId: string, _: ActionState, fd?: FormData): Promise<ActionState> {
-  const staff = await requireStaff("ADMIN");
+  const staff = await requireAdmin();
   const { students } = await cols();
   const student = await students.findOne({ _id: studentId });
   if (!student) return { error: "Student not found." };
@@ -169,7 +169,7 @@ export async function resetPinAction(studentId: string, _: ActionState, fd?: For
 }
 
 export async function setStudentActiveAction(studentId: string, _: ActionState, fd: FormData): Promise<ActionState> {
-  const staff = await requireStaff("ADMIN");
+  const staff = await requireAdmin();
   const active = fd.get("active") === "1";
   try {
     const res = await (await cols()).students.updateOne({ _id: studentId }, { $set: { active } });
@@ -185,7 +185,7 @@ export async function setStudentActiveAction(studentId: string, _: ActionState, 
 }
 
 export async function addHolidayAction(_: ActionState, fd: FormData): Promise<ActionState> {
-  const staff = await requireStaff("ADMIN");
+  const staff = await requireAdmin();
   const date = parseDate(String(fd.get("date") ?? ""));
   const name = String(fd.get("name") ?? "").trim().slice(0, 60) || "Holiday";
   const note = String(fd.get("note") ?? "").trim().slice(0, 120);
@@ -197,7 +197,7 @@ export async function addHolidayAction(_: ActionState, fd: FormData): Promise<Ac
 }
 
 export async function removeHolidayAction(date: string, _: ActionState): Promise<ActionState> {
-  const staff = await requireStaff("ADMIN");
+  const staff = await requireAdmin();
   await (await cols()).holidays.deleteOne({ _id: date });
   await audit(staff._id, "admin.remove_holiday", date);
   refresh();
@@ -212,9 +212,9 @@ const staffSchema = z.object({
   password: z.string().min(10, "At least 10 characters"),
 });
 
-/** Admin creates a staff account with a temporary password (they change it after signing in). */
+/** Admin creates a teacher or admin account with a temporary password (they change it after signing in). */
 export async function createStaffAction(_: ActionState, fd: FormData): Promise<ActionState> {
-  const admin = await requireStaff("ADMIN");
+  const admin = await requireAdmin();
   const p = staffSchema.safeParse({ ...Object.fromEntries(fd), courses: undefined });
   const courses = fd.getAll("courses").map(String).filter(Boolean).slice(0, 50);
   if (!p.success) return { fieldErrors: Object.fromEntries(p.error.issues.map((i) => [String(i.path[0]), i.message])) };
@@ -229,11 +229,11 @@ export async function createStaffAction(_: ActionState, fd: FormData): Promise<A
   }
   await audit(admin._id, "admin.create_staff", p.data.email);
   refresh();
-  return { ok: true, message: `${p.data.name} can now sign in with ${p.data.email} and the temporary password.` };
+  return { ok: true, message: `${p.data.name} can now sign in on the ${p.data.role === "ADMIN" ? "admin (/admin/login)" : "teacher (/teacher/login)"} page with ${p.data.email} and the temporary password.` };
 }
 
 export async function setStaffActiveAction(staffId: string, _: ActionState, fd: FormData): Promise<ActionState> {
-  const admin = await requireStaff("ADMIN");
+  const admin = await requireAdmin();
   if (staffId === admin._id) return { error: "You can't turn off your own account." };
   const active = fd.get("active") === "1";
   await (await cols()).staff.updateOne({ _id: staffId }, { $set: { active } });
@@ -242,9 +242,29 @@ export async function setStaffActiveAction(staffId: string, _: ActionState, fd: 
   return { ok: true, message: active ? "Account turned on." : "Account turned off." };
 }
 
+/**
+ * Admin: make an account a teacher or an admin (for example Mahek, who signs the month as admin).
+ * Not your own account, so the school always keeps at least one admin. Signatures already on rows
+ * and approvals stay as they are; the change only decides what the account does from now on.
+ */
+export async function setStaffRoleAction(staffId: string, _: ActionState, fd: FormData): Promise<ActionState> {
+  const admin = await requireAdmin();
+  if (staffId === admin._id) return { error: "You can't change your own role." };
+  const role = z.enum(["ADMIN", "TEACHER"]).safeParse(fd.get("role"));
+  if (!role.success) return { error: "Choose teacher or admin." };
+  const { staff } = await cols();
+  const before = await staff.findOne({ _id: staffId }, { projection: { role: 1, name: 1 } });
+  if (!before) return { error: "Account not found." };
+  if (before.role === role.data) return { ok: true, message: "Nothing changed." };
+  await staff.updateOne({ _id: staffId }, { $set: { role: role.data } });
+  await audit(admin._id, "admin.set_role", staffId, { from: before.role, to: role.data });
+  refresh();
+  return { ok: true, message: `${before.name} is now ${role.data === "ADMIN" ? "an admin: they sign in on the admin page and sign the month at the bottom" : "a teacher: they sign in on the teacher page and sign each row"}.` };
+}
+
 /** Admin: which courses a teacher can see. */
 export async function setStaffCoursesAction(staffId: string, _: ActionState, fd: FormData): Promise<ActionState> {
-  const admin = await requireStaff("ADMIN");
+  const admin = await requireAdmin();
   const courses = fd.getAll("courses").map(String).filter(Boolean).slice(0, 50);
   const res = await (await cols()).staff.updateOne({ _id: staffId, role: "TEACHER" }, { $set: { courses } });
   if (!res.matchedCount) return { error: "Teacher not found." };
@@ -255,7 +275,7 @@ export async function setStaffCoursesAction(staffId: string, _: ActionState, fd:
 
 /** Admin sets a new temporary password for a staff member who forgot theirs. */
 export async function resetStaffPasswordAction(staffId: string, _: ActionState, fd: FormData): Promise<ActionState> {
-  const admin = await requireStaff("ADMIN");
+  const admin = await requireAdmin();
   const password = String(fd.get("password") ?? "");
   if (password.length < 10) return { fieldErrors: { password: "At least 10 characters" } };
   const res = await (await cols()).staff.updateOne({ _id: staffId }, { $set: { passwordHash: await bcrypt.hash(password, 12) } });
@@ -265,11 +285,11 @@ export async function resetStaffPasswordAction(staffId: string, _: ActionState, 
 }
 
 /**
- * Staff put a student's signature on file for them (e.g. from a signed paper), or remove it so the
- * student adds it again. Past rows keep the signature they were signed with.
+ * An admin puts a student's signature on file for them (the student signs by hand on the admin's
+ * screen), or removes it so the student adds it again. Teachers can't: it is the student's signature. Past rows keep the signature they were signed with.
  */
 export async function setStudentSignatureAction(studentId: string, _: ActionState, fd: FormData): Promise<ActionState> {
-  const staff = await requireStaff();
+  const staff = await requireAdmin();
   const { students } = await cols();
   const student = await students.findOne({ _id: studentId });
   if (!student || !canSee(staff, student)) return { error: "Student not found." };
@@ -281,7 +301,7 @@ export async function setStudentSignatureAction(studentId: string, _: ActionStat
   }
   const checked = checkSignaturePng(fd.get("signature"));
   if ("error" in checked) return { error: checked.error };
-  const id = await saveSignature("STUDENT", studentId, checked.png, fd.get("source") === "UPLOAD" ? "UPLOAD" : "DRAWN", staff._id);
+  const id = await saveSignature("STUDENT", studentId, checked.png, "DRAWN", staff._id);
   await students.updateOne({ _id: studentId }, { $set: { signatureId: id } });
   await audit(staff._id, "staff.set_student_signature", studentId, { signatureId: id });
   refresh();
@@ -289,11 +309,11 @@ export async function setStudentSignatureAction(studentId: string, _: ActionStat
 }
 
 export async function goToSheetAction(_: ActionState, fd: FormData): Promise<ActionState> {
-  await requireStaff();
+  await requireAdmin();
   const id = String(fd.get("studentId") ?? "");
   const month = String(fd.get("month") ?? "");
   if (!z.string().uuid().safeParse(id).success || !/^\d{4}-\d{2}$/.test(month)) return { error: "Choose a student and month." };
-  redirect(`/staff/sheets/${id}/${month}`);
+  redirect(`/admin/sheets/${id}/${month}`);
 }
 
 const profileSchema = z.object({
@@ -307,7 +327,7 @@ const profileSchema = z.object({
 
 /** Contact and social details on the student profile. Admins only. */
 export async function saveStudentProfileAction(studentId: string, _: ActionState, fd: FormData): Promise<ActionState> {
-  const staff = await requireStaff("ADMIN");
+  const staff = await requireAdmin();
   const get = (k: string) => String(fd.get(k) ?? "");
   const p = profileSchema.safeParse({ phone: get("phone"), email: get("email").trim(), address: get("address"), emergencyName: get("emergencyName"), emergencyPhone: get("emergencyPhone"), social: get("social") });
   if (!p.success) return { fieldErrors: Object.fromEntries(p.error.issues.map((i) => [String(i.path[0]), i.message])) };

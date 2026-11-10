@@ -1,0 +1,41 @@
+import Link from "next/link";
+import { notFound } from "next/navigation";
+import { requireAdmin } from "@/lib/auth";
+import { canSee } from "@/lib/access";
+import { loadSheet, sheetHeader, thisMonth } from "@/lib/data";
+import { MONTH_RE, monthTitle, shiftMonth } from "@/lib/sheet";
+import { PaperSheet } from "@/components/PaperSheet";
+import { signatureImages } from "@/lib/signatures";
+import { editWindowDays, firstOpenDate } from "@/lib/policy";
+
+export const dynamic = "force-dynamic";
+
+export default async function StaffSheet({ params }: { params: Promise<{ studentId: string; month: string }> }) {
+  const staff = await requireAdmin();
+  const { studentId, month } = await params;
+  if (!/^[0-9a-f-]{36}$/.test(studentId) || !MONTH_RE.test(month)) notFound();
+  const sheet = await loadSheet(studentId, month);
+  if (!sheet || !canSee(staff, sheet.student)) notFound();
+  const s = sheet.student;
+  const prev = shiftMonth(month, -1), next = shiftMonth(month, 1);
+  // The signatures on file now, for the panel above the sheet (rows keep the ones they were signed with).
+  const onFile = await signatureImages([s.signatureId, staff.signatureId]);
+  return (
+    <main className="wrap" style={{ maxWidth: 1040 }}>
+      <div className="row no-print" style={{ justifyContent: "space-between", marginBottom: 14 }}>
+        <span className="row"><Link href="/admin/sheets">All sheets</Link><Link href={`/admin/students/${s._id}`}>{s.name}&apos;s profile</Link></span>
+        <div className="row">
+          {prev >= s.startDate.slice(0, 7) && <Link className="btn ghost" href={`/admin/sheets/${s._id}/${prev}`}>‹ {monthTitle(prev).split(" ")[0]}</Link>}
+          <strong>{monthTitle(month)}</strong>
+          {next <= thisMonth() && next <= s.endDate.slice(0, 7) && <Link className="btn ghost" href={`/admin/sheets/${s._id}/${next}`}>{monthTitle(next).split(" ")[0]} ›</Link>}
+          <a className="btn" href={`/api/report/${s._id}?month=${month}&format=pdf`}>PDF</a>
+          <a className="btn ghost" href={`/api/report/${s._id}?month=${month}&format=docx`}>Word (DOCX)</a>
+        </div>
+      </div>
+      <PaperSheet mode="admin" student={sheetHeader(s)} month={month} rows={sheet.rows} totalMinutes={sheet.totalMinutes}
+        approval={sheet.approval} approvalCurrent={sheet.approvalCurrent} hasSavedSignature={!!staff.signatureId} images={{ ...sheet.images, ...onFile }}
+        studentHasSignature={!!s.signatureId} studentSignatureId={s.signatureId} staffSignatureId={staff.signatureId} staffName={staff.name}
+        staffId={staff._id} staffPosition={staff.position} firstOpenDate={firstOpenDate()} editWindowDays={editWindowDays()} />
+    </main>
+  );
+}

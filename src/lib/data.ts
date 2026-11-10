@@ -1,7 +1,7 @@
 import "server-only";
 import { cols, type Entry, type Student } from "./db";
 import { env } from "./env";
-import { clockIn, isClassDay, monthMinutes, sheetRows, todayIn, toMinutes, type TimeRules } from "./sheet";
+import { addDays, clockIn, isClassDay, monthMinutes, sheetRows, todayIn, toMinutes, type TimeRules } from "./sheet";
 import { entriesHash } from "./hash";
 import { signatureImages } from "./signatures";
 import type { Filter } from "mongodb";
@@ -62,6 +62,28 @@ export async function loadDay(date: string, scope: Filter<Student>, course?: str
   const byStudent = new Map(rows.map((e) => [e.studentId, e]));
   const holiday = (await holidaysBetween(date, date)).get(date) ?? null;
   return { date, holiday, rows: list.map((s) => ({ student: s, entry: byStudent.get(s._id) ?? null })) };
+}
+
+/**
+ * Past class days the student can still fill in themselves: from `from` (the start of the editing
+ * window) to yesterday, nothing recorded, not a holiday, in a month that isn't approved.
+ */
+export async function missedDays(student: Student, from: string) {
+  const yesterday = addDays(today(), -1);
+  const start = from > student.startDate ? from : student.startDate;
+  if (start > yesterday) return [];
+  const days: string[] = [];
+  for (let d = start; d <= yesterday; d = addDays(d, 1)) if (isClassDay(student, d)) days.push(d);
+  if (!days.length) return [];
+  const { entries, approvals } = await cols();
+  const [rows, holidays, apps] = await Promise.all([
+    entries.find({ studentId: student._id, date: { $in: days } }, { projection: { date: 1 } }).toArray(),
+    holidaysBetween(start, yesterday),
+    approvals.find({ studentId: student._id, month: { $in: [...new Set(days.map((d) => d.slice(0, 7)))] } }, { projection: { month: 1 } }).toArray(),
+  ]);
+  const recorded = new Set(rows.map((e) => e.date));
+  const approved = new Set(apps.map((a) => a.month));
+  return days.filter((d) => !recorded.has(d) && !holidays.has(d) && !approved.has(d.slice(0, 7)));
 }
 
 export const courseNames = async (scope: Filter<Student> = {}) =>

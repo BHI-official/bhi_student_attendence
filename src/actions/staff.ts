@@ -5,7 +5,7 @@ import { revalidatePath } from "next/cache";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
 import { audit, cols, newId, rateLimit, type Entry, type EntryStatus, type RowComment } from "@/lib/db";
-import { endStaffSession, requireStaff, startStaffSession } from "@/lib/auth";
+import { PORTAL, endStaffSession, requireStaff, startStaffSession } from "@/lib/auth";
 import { holidaysBetween, thisMonth, today } from "@/lib/data";
 import { DATE_RE, MONTH_RE, TIME_RE, addDays, isClassDay, minutesBetween, time12, usDate } from "@/lib/sheet";
 import { entriesHash } from "@/lib/hash";
@@ -14,23 +14,36 @@ import { checkNotePng, checkSignaturePng, saveSignature } from "@/lib/signatures
 import { editWindowDays, isLocked, lockedFor } from "@/lib/policy";
 import type { ActionState } from "@/lib/action";
 
-const refresh = () => { revalidatePath("/staff", "layout"); revalidatePath("/student", "layout"); };
+const refresh = () => { revalidatePath("/admin", "layout"); revalidatePath("/teacher", "layout"); revalidatePath("/student", "layout"); };
 
-export async function staffLoginAction(_: ActionState, fd: FormData): Promise<ActionState> {
+/**
+ * Admins and teachers each have their own sign-in page. The password is checked first, so the
+ * "wrong page" hint only appears to someone who already knows the password.
+ */
+async function signIn(role: "ADMIN" | "TEACHER", fd: FormData): Promise<ActionState> {
   const email = String(fd.get("email") ?? "").trim().toLowerCase();
   const password = String(fd.get("password") ?? "");
   if (!email || !password) return { error: "Enter your email and password." };
   if (!(await rateLimit(`login:${email}`, 8, 900))) return { error: "Too many tries. Wait 15 minutes." };
   const staff = await (await cols()).staff.findOne({ email, active: true });
   if (!staff || !(await bcrypt.compare(password, staff.passwordHash))) return { error: "Email or password is incorrect." };
+  if (staff.role !== role) {
+    return { error: staff.role === "ADMIN" ? "This is an admin account. Use the admin sign-in page." : "This is a teacher account. Use the teacher sign-in page." };
+  }
   await startStaffSession(staff);
-  await audit(staff._id, "staff.login", staff._id);
-  redirect("/staff");
+  await audit(staff._id, role === "ADMIN" ? "admin.login" : "teacher.login", staff._id);
+  redirect(PORTAL[role].home);
 }
+export async function adminLoginAction(_: ActionState, fd: FormData) { return signIn("ADMIN", fd); }
+export async function teacherLoginAction(_: ActionState, fd: FormData) { return signIn("TEACHER", fd); }
 
-export async function staffLogoutAction() {
+export async function adminLogoutAction() {
   await endStaffSession();
-  redirect("/staff/login");
+  redirect(PORTAL.ADMIN.login);
+}
+export async function teacherLogoutAction() {
+  await endStaffSession();
+  redirect(PORTAL.TEACHER.login);
 }
 
 /**
@@ -38,6 +51,11 @@ export async function staffLogoutAction() {
  * Holidays (on the holiday list, or a row marked Holiday) are never signed.
  */
 const NO_SIG = "Sign by hand, or put your signature on file (My account) to sign with one tap.";
+/** Teachers review a student's entries; only the student (and admins) write them. */
+const TEACHER_READ_ONLY = "Teachers can't change a student's entries. Ask an admin.";
+/** Who signs what: the teacher signs each row, an admin signs the month at the bottom. */
+const ROWS_ARE_TEACHERS = "Each row is signed by the teacher. Admins sign the “Approved by” section at the bottom of the month.";
+const APPROVAL_IS_ADMINS = "The “Approved by” section is signed by an admin. Teachers sign each row.";
 const isHolidayRow = (e: Entry | null, holiday: boolean) => holiday || e?.status === "HOLIDAY";
 const signable = (e: Entry | null, holiday: boolean) =>
   !isHolidayRow(e, holiday) && !!e && (e.status !== "PRESENT" || (!!e.startTime && !!e.endTime));
@@ -46,15 +64,16 @@ const signable = (e: Entry | null, holiday: boolean) =>
 const needsStudentSig = (e: Entry | null) => !!e && e.status === "PRESENT" && !!e.startTime && !!e.endTime && !e.studentSignature;
 
 /**
- * Staff signs many rows at once (the "Staff signature" column), with one drawing or their saved
- * signature. Rows already signed by staff are left alone. Holidays are skipped: no signatures.
+ * The teacher signs many rows at once (the "Staff signature" column), with one handwritten
+ * signature or their signature on file. Only teachers sign rows; admins sign the month.
  *
- * Staff can also add the student's signature on file, in the same step, to present rows that
- * don't have one (e.g. staff wrote the times because the student forgot to tap End). This is
- * recorded on the signature, in the row's history and in the audit log.
+ * A row is only ever signed once: rows already signed are left alone, so nobody's signature is
+ * replaced here. Because teachers are the only ones who sign rows, they can sign an unsigned row
+ * after the editing window too (signing doesn't change the student's entries). Holidays are skipped.
  */
 export async function signRowsAction(_: ActionState, fd: FormData): Promise<ActionState> {
   const staff = await requireStaff();
+  if (staff.role !== "TEACHER") return { error: ROWS_ARE_TEACHERS };
   const keys = z.array(z.string().regex(/^[0-9a-f-]{36}:\d{4}-\d{2}-\d{2}$/)).max(1000).safeParse(JSON.parse(String(fd.get("rows") ?? "[]")));
   if (!keys.success || !keys.data.length) return { error: "Choose the rows to sign." };
   // Signed by hand just now, or with the signature on file.
@@ -62,21 +81,17 @@ export async function signRowsAction(_: ActionState, fd: FormData): Promise<Acti
   const hand = rawHand ? checkSignaturePng(rawHand) : null;
   if (hand && "error" in hand) return { error: hand.error };
   if (!hand && !staff.signatureId) return { error: NO_SIG };
-  const wantsStudentSig = fd.get("withStudentSignature") === "1";
   const { entries, students } = await cols();
   const dates = keys.data.map((k) => k.slice(37));
   const holidays = await holidaysBetween(dates.reduce((a, b) => (a < b ? a : b)), dates.reduce((a, b) => (a > b ? a : b)));
   const now = new Date();
   const sigId = hand ? await saveSignature("STAFF", staff._id, hand.png, "DRAWN", staff._id) : staff.signatureId!;
   const sig = { id: sigId, at: now, staffId: staff._id, staffName: staff.name };
-  let locked = 0;
-  let signed = 0, studentSigned = 0, holidaysSkipped = 0;
+  let signed = 0, holidaysSkipped = 0;
   const skipped: string[] = [];
-  const noStudentSig: string[] = [];
   for (const key of new Set(keys.data)) {
     const [studentId, date] = [key.slice(0, 36), key.slice(37)];
     if (date > today()) { skipped.push(`${usDate(date)} is in the future`); continue; }
-    if (lockedFor(staff, date)) { locked++; continue; }
     const student = await students.findOne({ _id: studentId });
     if (!student || !canSee(staff, student)) { skipped.push(`${usDate(date)}: not one of your students`); continue; }
     if (!isClassDay(student, date)) { skipped.push(`${student.name} ${usDate(date)}: not a class day`); continue; }
@@ -84,37 +99,14 @@ export async function signRowsAction(_: ActionState, fd: FormData): Promise<Acti
     const e = await entries.findOne({ _id: key });
     if (isHolidayRow(e, !!holiday)) { holidaysSkipped++; continue; }
     if (!signable(e, !!holiday)) { skipped.push(`${student.name} ${usDate(date)}: not finished`); continue; }
-    if (wantsStudentSig && needsStudentSig(e)) {
-      if (!student.signatureId) noStudentSig.push(student.name);
-      else {
-        // Both signatures in one write, and only if neither was added in the meantime.
-        const studentSignature = { id: student.signatureId, at: now, addedBy: { staffId: staff._id, staffName: staff.name } };
-        const res = await entries.updateOne(
-          { _id: key, staffSignature: null, studentSignature: null },
-          {
-            $set: { staffSignature: sig, studentSignature, updatedAt: now },
-            $push: { history: { at: now, byId: staff._id, byName: staff.name, what: "student signature on file added by staff", reason: "signed with staff signature" } },
-          },
-        );
-        if (res.modifiedCount) {
-          signed++; studentSigned++;
-          await audit(staff._id, "staff.add_student_signature", key, { signatureId: student.signatureId });
-          continue;
-        }
-      }
-    }
     const res = await entries.updateOne({ _id: key, staffSignature: null }, { $set: { staffSignature: sig, updatedAt: now } });
     if (res.modifiedCount) signed++;
   }
-  await audit(staff._id, "staff.sign_rows", "entries", { signed, studentSigned, skipped: skipped.length, holidaysSkipped, locked, handwritten: !!hand, signatureId: sigId });
+  await audit(staff._id, "staff.sign_rows", "entries", { signed, skipped: skipped.length, holidaysSkipped, handwritten: !!hand, signatureId: sigId });
   refresh();
   const list = (xs: string[]) => `${xs.slice(0, 5).join("; ")}${xs.length > 5 ? ` and ${xs.length - 5} more` : ""}`;
-  const names = [...new Set(noStudentSig)];
   const extra =
-    (studentSigned ? ` Added the student's signature to ${studentSigned} of them.` : "") +
-    (names.length ? ` No signature on file for ${list(names)}, so their row${noStudentSig.length === 1 ? " has" : "s have"} no student signature yet.` : "") +
     (holidaysSkipped ? ` Holidays are left unsigned (${holidaysSkipped}).` : "") +
-    (locked ? ` ${locked} row${locked === 1 ? " is" : "s are"} older than ${editWindowDays()} days and locked: ask an admin.` : "") +
     (skipped.length ? ` Not signed: ${list(skipped)}.` : "");
   return signed ? { ok: true, message: `Signed ${signed} row${signed === 1 ? "" : "s"}.${extra}` } : { error: `Nothing was signed.${extra}` };
 }
@@ -153,9 +145,10 @@ async function addStudentSignature(staff: StaffDoc, rowKey: string): Promise<{ o
   return { ok: true, message: `Student signature added for ${student.name}, ${usDate(date)}.` };
 }
 
-/** One tap in the "Student signature" cell: fill it with the student's signature on file. */
+/** One tap in the "Student signature" cell: fill it with the student's signature on file. Admins only. */
 export async function fillStudentSignatureAction(rowKey: string): Promise<ActionState> {
   const staff = await requireStaff();
+  if (staff.role !== "ADMIN") return { error: TEACHER_READ_ONLY };
   const r = await addStudentSignature(staff, rowKey);
   if (r.ok) refresh();
   return r.ok ? { ok: true, message: r.message } : { error: r.message };
@@ -164,6 +157,7 @@ export async function fillStudentSignatureAction(rowKey: string): Promise<Action
 /** "Fill student signature on all rows": the same as tapping each cell. */
 export async function fillStudentSignaturesAction(rowKeys: string[]): Promise<ActionState> {
   const staff = await requireStaff();
+  if (staff.role !== "ADMIN") return { error: TEACHER_READ_ONLY };
   const keys = z.array(z.string().regex(ROW_KEY)).min(1).max(100).safeParse(rowKeys);
   if (!keys.success) return { error: "Choose the rows to fill." };
   let added = 0;
@@ -185,6 +179,8 @@ export async function fillStudentSignaturesAction(rowKeys: string[]): Promise<Ac
 export async function replaceRowSignatureAction(rowKey: string, which: "student" | "staff"): Promise<ActionState> {
   const staff = await requireStaff();
   if (!ROW_KEY.test(rowKey) || (which !== "student" && which !== "staff")) return { error: "Invalid row." };
+  if (which === "student" && staff.role !== "ADMIN") return { error: TEACHER_READ_ONLY };
+  if (which === "staff" && staff.role !== "TEACHER") return { error: ROWS_ARE_TEACHERS };
   const [studentId, date] = [rowKey.slice(0, 36), rowKey.slice(37)];
   const { entries, students } = await cols();
   const student = await students.findOne({ _id: studentId });
@@ -228,11 +224,12 @@ export async function replaceRowSignatureAction(rowKey: string, which: "student"
 }
 
 /**
- * Staff corrects a row: status, times, note. A change to a row that already had values needs a
+ * An admin corrects a row: status, times, note. Teachers can't (the student's entries are theirs). A change to a row that already had values needs a
  * reason, is kept in the row's history, and removes the staff signature so the row is signed again.
  */
 export async function editRowAction(studentId: string, date: string, _: ActionState, fd: FormData): Promise<ActionState> {
   const staff = await requireStaff();
+  if (staff.role !== "ADMIN") return { error: TEACHER_READ_ONLY };
   if (!z.string().uuid().safeParse(studentId).success || !DATE_RE.test(date)) return { error: "Invalid row." };
   if (date > today()) return { error: "You can't fill in a future date." };
   const status = z.enum(["PRESENT", "ABSENT", "EXCUSED", "HOLIDAY"]).safeParse(fd.get("status"));
@@ -286,12 +283,13 @@ export async function editRowAction(studentId: string, date: string, _: ActionSt
     before: before ? { status: before.status, startTime: before.startTime, endTime: before.endTime, staffSignature: before.staffSignature ?? null } : null, after, reason,
   });
   refresh();
-  return { ok: true, message: `${student.name}, ${usDate(date)} saved. Sign the row again.` };
+  return { ok: true, message: `${student.name}, ${usDate(date)} saved. The teacher signs the row again.` };
 }
 
-/** End of day: every listed student with no start time is marked absent. */
+/** End of day: every listed student with no start time is marked absent. Admins only. */
 export async function markAbsentAction(date: string, _: ActionState, fd: FormData): Promise<ActionState> {
   const staff = await requireStaff();
+  if (staff.role !== "ADMIN") return { error: TEACHER_READ_ONLY };
   if (!DATE_RE.test(date) || date > today()) return { error: "Invalid date." };
   const lock = lockedFor(staff, date);
   if (lock) return { error: lock };
@@ -322,12 +320,13 @@ export async function markAbsentAction(date: string, _: ActionState, fd: FormDat
 }
 
 /**
- * The "Approved by" block: staff name, position, signature (on file, or signed by hand now) and
- * comments (typed and/or handwritten) for the month. An approval made by someone else (for example
- * historical approvals) can only be replaced by an admin.
+ * The "Approved by" block at the bottom of the month, signed by an admin: staff name and position (as typed, defaulting to the account), signature (on file, or signed by hand now) and
+ * comments (typed and/or handwritten) for the month. Approving again replaces the approval; the one
+ * it replaces is kept in the audit log.
  */
 export async function approveMonthAction(studentId: string, month: string, _: ActionState, fd: FormData): Promise<ActionState> {
   const staff = await requireStaff();
+  if (staff.role !== "ADMIN") return { error: APPROVAL_IS_ADMINS };
   if (!z.string().uuid().safeParse(studentId).success || !MONTH_RE.test(month) || month > thisMonth()) return { error: "Invalid month." };
   const rawHand = String(fd.get("signature") ?? "");
   const hand = rawHand ? checkSignaturePng(rawHand) : null;
@@ -339,25 +338,26 @@ export async function approveMonthAction(studentId: string, month: string, _: Ac
   const student = await (await cols()).students.findOne({ _id: studentId });
   if (!student || !canSee(staff, student)) return { error: "That student isn't in your courses." };
   const comments = String(fd.get("comments") ?? "").trim().slice(0, 600);
+  // "STAFF NAME/POSITION" on the form. Defaults to the account; the account id is always recorded.
+  const staffName = String(fd.get("staffName") ?? staff.name).trim().replace(/\s+/g, " ").slice(0, 80);
+  const position = String(fd.get("position") ?? staff.position).trim().replace(/\s+/g, " ").slice(0, 60);
+  if (staffName.length < 2) return { fieldErrors: { staffName: "Enter your name as it should be printed" } };
   const { entries, approvals } = await cols();
   const list = await entries.find({ studentId, date: { $gte: `${month}-01`, $lte: `${month}-31` } }).toArray();
   if (!list.length) return { error: "There is nothing to approve for this month yet." };
   const existing = await approvals.findOne({ _id: `${studentId}:${month}` });
-  if (existing && existing.staffId !== staff._id && staff.role !== "ADMIN") {
-    return { error: `This month was approved by ${existing.staffName}. Only an admin can replace their approval.` };
-  }
   const signatureId = hand ? await saveSignature("STAFF", staff._id, hand.png, "DRAWN", staff._id) : staff.signatureId!;
   const commentsInkId = ink ? await saveSignature("STAFF", staff._id, ink.png, "DRAWN", staff._id, "NOTE") : null;
   const now = new Date();
   // Only replace the approval we looked at, so two people approving at once can't overwrite each other unseen.
   const res = await approvals.updateOne(
     existing ? { _id: existing._id, signedAt: existing.signedAt } : { _id: `${studentId}:${month}` },
-    { $set: { studentId, month, staffId: staff._id, staffName: staff.name, position: staff.position, signatureId, comments, commentsInkId, entriesHash: entriesHash(list), signedAt: now } },
+    { $set: { studentId, month, staffId: staff._id, staffName, position, signatureId, comments, commentsInkId, entriesHash: entriesHash(list), signedAt: now } },
     { upsert: !existing },
   );
   if (existing && !res.matchedCount) return { error: "Someone else approved this month just now. Reload the page." };
   await audit(staff._id, "staff.approve_month", `${studentId}:${month}`, {
-    rows: list.length, handwritten: !!hand, handwrittenComments: !!commentsInkId,
+    rows: list.length, handwritten: !!hand, handwrittenComments: !!commentsInkId, staffName, position, account: staff.name,
     replaced: existing ? { staffId: existing.staffId, staffName: existing.staffName, signatureId: existing.signatureId, signedAt: existing.signedAt } : null,
   });
   refresh();
@@ -396,11 +396,12 @@ export async function addCommentAction(rowKey: string, _: ActionState, fd: FormD
 /**
  * A day off for one class (a course): every student of the course with class that day gets the day
  * marked Holiday (or Excused) with a note. Days a student has already started are left alone.
- * "Remove" takes the mark off again where nothing else was recorded. Teachers: their own courses,
- * and not on locked days. Future days are allowed (up to a year ahead) so a closure can be planned.
+ * "Remove" takes the mark off again where nothing else was recorded. Admins only (it writes on the
+ * students' rows). Future days are allowed (up to a year ahead) so a closure can be planned.
  */
 export async function markCourseDayAction(_: ActionState, fd: FormData): Promise<ActionState> {
   const staff = await requireStaff();
+  if (staff.role !== "ADMIN") return { error: "Only an admin can mark a class day off." };
   const date = String(fd.get("date") ?? "");
   const course = String(fd.get("course") ?? "").trim();
   const mode = z.enum(["HOLIDAY", "EXCUSED", "REMOVE"]).safeParse(fd.get("status"));
@@ -461,16 +462,16 @@ export async function markCourseDayAction(_: ActionState, fd: FormData): Promise
   };
 }
 
-/** Staff put their own signature on file (uploaded photo or drawn). A new one replaces it for future rows only. */
+/** A teacher or admin puts their own handwritten signature on file. A new one replaces it for future signing only. */
 export async function saveMySignatureAction(_: ActionState, fd: FormData): Promise<ActionState> {
   const staff = await requireStaff();
   const checked = checkSignaturePng(fd.get("signature"));
   if ("error" in checked) return { error: checked.error };
-  const id = await saveSignature("STAFF", staff._id, checked.png, fd.get("source") === "UPLOAD" ? "UPLOAD" : "DRAWN", staff._id);
+  const id = await saveSignature("STAFF", staff._id, checked.png, "DRAWN", staff._id);
   await (await cols()).staff.updateOne({ _id: staff._id }, { $set: { signatureId: id } });
   await audit(staff._id, "staff.signature_on_file", staff._id, { signatureId: id });
   refresh();
-  return { ok: true, message: "Signature on file. You can now sign rows and approve months with one tap." };
+  return { ok: true, message: staff.role === "ADMIN" ? "Signature on file. You can now approve months with one tap." : "Signature on file. You can now sign rows with one tap." };
 }
 
 export async function changePasswordAction(_: ActionState, fd: FormData): Promise<ActionState> {

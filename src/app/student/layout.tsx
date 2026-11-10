@@ -6,7 +6,7 @@ export default function StudentLayout({ children }: { children: React.ReactNode 
     <>
       <header className="bar">
         <BrandMark href="/student" subtitle="Student attendance sheet" />
-        <nav className="nav"><Link href="/staff">Staff</Link></nav>
+        <nav className="nav" aria-label="Staff sign-in"><Link href="/teacher">Teachers</Link><Link href="/admin">Admin</Link></nav>
       </header>
       {children}
     </>

@@ -94,11 +94,11 @@ before(async () => {
   await db.collection("staff").insertMany([
     { _id: ids.admin, name: "Ada Admin", email: "admin@x.test", position: "Director", role: "ADMIN", courses: [], passwordHash: hash, signatureId: null, active: true, createdAt: now },
     { _id: ids.teacher, name: "Tom Teacher", email: "tom@x.test", position: "Instructor", role: "TEACHER", courses: ["Office"], passwordHash: hash, signatureId: sigIds.teacher, active: true, createdAt: now },
-    { _id: ids.mahek, name: "Mahek", email: "mahek@x.test", position: "Asst. Director", role: "TEACHER", courses: ["Office"], passwordHash: hash, signatureId: sigIds.mahek, active: true, createdAt: now },
+    { _id: ids.mahek, name: "Mahek", email: "mahek@x.test", position: "Asst. Director", role: "ADMIN", courses: [], passwordHash: hash, signatureId: sigIds.mahek, active: true, createdAt: now },
   ] as any[]);
   await db.collection("signatures").insertMany([
-    { _id: sigIds.mahek, ownerType: "STAFF", ownerId: ids.mahek, png: SIG, source: "UPLOAD", createdAt: now, createdBy: ids.mahek },
-    { _id: sigIds.teacher, ownerType: "STAFF", ownerId: ids.teacher, png: SIG, source: "UPLOAD", createdAt: now, createdBy: ids.teacher },
+    { _id: sigIds.mahek, ownerType: "STAFF", ownerId: ids.mahek, png: SIG, source: "DRAWN", createdAt: now, createdBy: ids.mahek },
+    { _id: sigIds.teacher, ownerType: "STAFF", ownerId: ids.teacher, png: SIG, source: "DRAWN", createdAt: now, createdBy: ids.teacher },
   ] as any[]);
 });
 after(async () => {
@@ -142,7 +142,7 @@ test("PINs are unique among active students, never trivial, and only admins rese
 
   // Teachers can't reset PINs.
   await asStaff(ids.teacher);
-  assert.equal(await redirected(A.resetPinAction(kevin!._id, {}, fd({}))), "/staff");
+  assert.equal(await redirected(A.resetPinAction(kevin!._id, {}, fd({}))), "/teacher");
 
   // Admin: typed PIN that another student has is refused; random works.
   await asStaff(ids.admin);
@@ -265,22 +265,15 @@ test("the student can sign an open day staff completed, but not a locked one; an
 
 // ---------------------------------------------------------------- Seven-day window and history
 
-test("teachers can't change rows older than 7 days; admins can, with a reason that is recorded", async () => {
+test("the 7-day window: teachers can't comment on old rows but can still sign an unsigned one; admins change rows with a recorded reason", async () => {
   const maria = await studentByName("Maria Lopez");
   await asStaff(ids.teacher);
-  let r = await S.editRowAction(maria!._id, d10, {}, fd({ status: "PRESENT", startTime: "09:00", endTime: "14:00", reason: "fix" }));
-  assert.match(r.error ?? "", /locked/);
-  r = await S.editRowAction(maria!._id, d3, {}, fd({ status: "PRESENT", startTime: "09:00", endTime: "14:00", reason: "left early" }));
-  assert.ok(r.ok, JSON.stringify(r));
-  const s = new FormData(); s.set("rows", JSON.stringify([`${maria!._id}:${d10}`]));
-  r = await S.signRowsAction({}, s);
-  assert.match(r.error ?? "", /locked/);
-  r = await S.markAbsentAction(d10, {}, fd({ students: JSON.stringify([maria!._id]) }));
-  assert.match(r.error ?? "", /locked/);
-  r = await S.addCommentAction(`${maria!._id}:${d10}`, {}, fd({ text: "late note" }));
+  let r = await S.addCommentAction(`${maria!._id}:${d10}`, {}, fd({ text: "late note" }));
   assert.match(r.error ?? "", /locked/);
 
   await asStaff(ids.admin);
+  r = await S.editRowAction(maria!._id, d3, {}, fd({ status: "PRESENT", startTime: "09:00", endTime: "14:00", reason: "left early" }));
+  assert.ok(r.ok, JSON.stringify(r));
   r = await S.editRowAction(maria!._id, d10, {}, fd({ status: "PRESENT", startTime: "09:00", endTime: "14:00", reason: "" }));
   assert.match(r.fieldErrors?.reason ?? "", /locked/);
   r = await S.editRowAction(maria!._id, d10, {}, fd({ status: "PRESENT", startTime: "09:00", endTime: "14:00", reason: "Paper sheet shows 2 pm" }));
@@ -289,6 +282,15 @@ test("teachers can't change rows older than 7 days; admins can, with a reason th
   assert.equal(log!.meta.reason, "Paper sheet shows 2 pm");
   r = await S.addCommentAction(`${maria!._id}:${d10}`, {}, fd({ text: "Checked against paper" }));
   assert.ok(r.ok);
+  // Admins don't sign rows: that's the teacher's signature.
+  const s = new FormData(); s.set("rows", JSON.stringify([`${maria!._id}:${d10}`])); s.set("signature", SIG);
+  assert.match((await S.signRowsAction({}, s)).error ?? "", /signed by the teacher/);
+
+  // The teacher signs the corrected old row: it had no signature, so nothing is replaced.
+  await asStaff(ids.teacher);
+  r = await S.signRowsAction({}, s);
+  assert.ok(r.ok, JSON.stringify(r));
+  assert.equal((await db.collection("entries").findOne({ _id: `${maria!._id}:${d10}` as any }))!.staffSignature.staffId, ids.teacher);
 });
 
 test("historical signatures are kept: nobody swaps a signature on a locked row, and nobody replaces Mahek's", async () => {
@@ -297,10 +299,10 @@ test("historical signatures are kept: nobody swaps a signature on a locked row, 
   const base = { studentId: kevin!._id, status: "PRESENT", startAt: null, endAt: null, startTime: "09:00", endTime: "15:00", minutes: 360, studentSignature: null, staffSignature: mahekSig, note: "", history: [], comments: [], updatedAt: new Date() };
   await db.collection("entries").insertMany([{ _id: `${kevin!._id}:${d10}`, date: d10, ...base }, { _id: `${kevin!._id}:${d3}`, date: d3, ...base }] as any[]);
 
-  for (const who of [ids.teacher, ids.admin]) {
+  for (const who of [ids.teacher, ids.admin, ids.mahek]) {
     await asStaff(who);
     const r = await S.replaceRowSignatureAction(`${kevin!._id}:${d10}`, "staff");
-    assert.match(r.error ?? "", /locked/);
+    assert.match(r.error ?? "", who === ids.teacher ? /locked/ : /signed by the teacher/);
   }
   await asStaff(ids.teacher);
   let r = await S.replaceRowSignatureAction(`${kevin!._id}:${d3}`, "staff");
@@ -310,15 +312,12 @@ test("historical signatures are kept: nobody swaps a signature on a locked row, 
   await S.signRowsAction({}, s);
   const rows = await db.collection("entries").find({ _id: { $in: [`${kevin!._id}:${d10}`, `${kevin!._id}:${d3}`] } as any }).toArray();
   assert.ok(rows.every((x) => x.staffSignature.id === sigIds.mahek && x.staffSignature.staffName === "Mahek"));
-  // Mahek can update her own signature on an open row; the old image stays stored.
-  const newMahek = randomUUID();
-  await db.collection("signatures").insertOne({ _id: newMahek, ownerType: "STAFF", ownerId: ids.mahek, png: SIG, source: "DRAWN", createdAt: new Date(), createdBy: ids.mahek } as any);
-  await db.collection("staff").updateOne({ _id: ids.mahek as any }, { $set: { signatureId: newMahek } });
+  // Mahek is an admin now: she signs months, not rows, so her old row signatures simply stay.
   await asStaff(ids.mahek);
   r = await S.replaceRowSignatureAction(`${kevin!._id}:${d3}`, "staff");
-  assert.ok(r.ok, JSON.stringify(r));
+  assert.match(r.error ?? "", /signed by the teacher/);
   assert.ok(await db.collection("signatures").findOne({ _id: sigIds.mahek as any }), "old signature image is never deleted");
-  assert.equal((await db.collection("entries").findOne({ _id: `${kevin!._id}:${d10}` as any }))!.staffSignature.id, sigIds.mahek);
+  assert.equal((await db.collection("entries").findOne({ _id: `${kevin!._id}:${d3}` as any }))!.staffSignature.id, sigIds.mahek);
 });
 
 test("staff validate attendance by signing by hand; that signature is stored per signing", async () => {
@@ -344,7 +343,7 @@ test("staff validate attendance by signing by hand; that signature is stored per
   await db.collection("staff").updateOne({ _id: ids.teacher as any }, { $set: { signatureId: sigIds.teacher } });
 });
 
-test("month approvals: someone else's approval (e.g. Mahek's) is only replaced by an admin", async () => {
+test("month approvals (the bottom of the sheet) are signed by admins like Mahek, never by teachers", async () => {
   const kevin = await studentByName("Kevin Reid");
   await db.collection("entries").insertOne({ _id: `${kevin!._id}:${lastMonth}-15`, studentId: kevin!._id, date: `${lastMonth}-15`, status: "ABSENT", startAt: null, endAt: null, startTime: null, endTime: null, minutes: null, studentSignature: null, staffSignature: null, note: "", history: [], comments: [], updatedAt: new Date() } as any);
   await asStaff(ids.mahek);
@@ -353,8 +352,9 @@ test("month approvals: someone else's approval (e.g. Mahek's) is only replaced b
   const a = await db.collection("month_approvals").findOne({ _id: `${kevin!._id}:${lastMonth}` as any });
   assert.ok(a!.commentsInkId);
   await asStaff(ids.teacher);
-  r = await S.approveMonthAction(kevin!._id, lastMonth, {}, fd({ comments: "mine" }));
-  assert.match(r.error ?? "", /approved by Mahek/);
+  r = await S.approveMonthAction(kevin!._id, lastMonth, {}, fd({ comments: "mine", signature: SIG }));
+  assert.match(r.error ?? "", /signed by an admin/);
+  assert.equal((await db.collection("month_approvals").findOne({ _id: `${kevin!._id}:${lastMonth}` as any }))!.staffName, "Mahek", "Mahek's approval is untouched");
   await asStaff(ids.mahek);
   r = await S.approveMonthAction(kevin!._id, lastMonth, {}, fd({ comments: "Good month, checked again", signature: SIG }));
   assert.ok(r.ok, "the same person can approve again");
@@ -367,13 +367,13 @@ test("month approvals: someone else's approval (e.g. Mahek's) is only replaced b
 
 // ---------------------------------------------------------------- Class days off, comments, scope
 
-test("a class day off: teachers mark their own classes with a note; a student can't start on it", async () => {
+test("a class day off: only admins mark it, with a note; a student can't start on it", async () => {
   const lukasz = await studentByName("Łukasz Nowak");
   await asStaff(ids.teacher);
-  let r = await S.markCourseDayAction({}, fd({ date: today, course: "Night", status: "HOLIDAY", note: "Room flooded" }));
-  assert.match(r.error ?? "", /isn't one of yours/);
-  r = await S.markCourseDayAction({}, fd({ date: d10, course: "Office", status: "HOLIDAY", note: "x" + "y" }));
-  assert.match(r.error ?? "", /locked/);
+  let r = await S.markCourseDayAction({}, fd({ date: sheet.addDays(today, 3), course: "Office", status: "HOLIDAY", note: "Instructor training" }));
+  assert.match(r.error ?? "", /Only an admin/);
+  assert.equal(await db.collection("entries").countDocuments({ date: sheet.addDays(today, 3) }), 0, "nothing written");
+  await asStaff(ids.admin);
   r = await S.markCourseDayAction({}, fd({ date: sheet.addDays(today, 3), course: "Office", status: "HOLIDAY", note: "" }));
   assert.ok(r.fieldErrors?.note);
   r = await S.markCourseDayAction({}, fd({ date: sheet.addDays(today, 3), course: "Office", status: "HOLIDAY", note: "Instructor training" }));
@@ -384,7 +384,6 @@ test("a class day off: teachers mark their own classes with a note; a student ca
   assert.ok(r.ok);
   assert.equal(await db.collection("entries").countDocuments({ date: sheet.addDays(today, 3) }), 0);
 
-  await asStaff(ids.admin);
   r = await S.markCourseDayAction({}, fd({ date: today, course: "Night", status: "HOLIDAY", note: "Room flooded" }));
   assert.ok(r.ok, JSON.stringify(r));
   await asStudent(lukasz!._id);
@@ -402,9 +401,10 @@ test("teachers only reach students of their own classes", async () => {
   await asStaff(ids.teacher);
   const r = await S.addCommentAction(`${lukasz!._id}:${today}`, {}, fd({ text: "hi" }));
   assert.match(r.error ?? "", /isn't in your courses/);
-  const e = await S.editRowAction(lukasz!._id, today, {}, fd({ status: "ABSENT", reason: "x" }));
-  assert.match(e.error ?? "", /isn't in your courses/);
-  assert.equal(await redirected(A.saveStudentProfileAction(lukasz!._id, {}, fd({ phone: "1" }))), "/staff");
+  const s = new FormData(); s.set("rows", JSON.stringify([`${lukasz!._id}:${today}`])); s.set("signature", SIG);
+  assert.match((await S.signRowsAction({}, s)).error ?? "", /not one of your students/);
+  assert.match((await S.replaceRowSignatureAction(`${lukasz!._id}:${today}`, "staff")).error ?? "", /isn't in your courses/);
+  assert.equal(await redirected(A.saveStudentProfileAction(lukasz!._id, {}, fd({ phone: "1" }))), "/teacher");
 });
 
 test("the profile keeps contact and social information (admins edit it)", async () => {
@@ -454,4 +454,172 @@ test("reports build with any names and comments (accents, other alphabets, emoji
   const helv = await (await PDFDocument.create()).embedFont("Helvetica");
   // Accents the font has are kept (é, curly quotes); others lose the accent (Ł -> L); emoji become "?".
   assert.equal(report.pdfSafe("Łukasz Très 👍 “x”", helv), "Lukasz Très ? “x”");
+});
+
+// ---------------------------------------------------------------- Admin and teacher portals
+
+test("admins and teachers each sign in on their own page", async () => {
+  jar().clear();
+  const login = (fn: any, email: string) => fn({}, fd({ email, password: "password-123456" }));
+  assert.match((await login(S.teacherLoginAction, "admin@x.test")).error ?? "", /admin account/);
+  assert.match((await login(S.adminLoginAction, "tom@x.test")).error ?? "", /teacher account/);
+  assert.equal(jar().size, 0, "no session from the wrong page");
+  assert.equal(await redirected(login(S.teacherLoginAction, "tom@x.test")), "/teacher");
+  assert.equal(await redirected(login(S.adminLoginAction, "admin@x.test")), "/admin");
+  assert.match((await S.teacherLoginAction({}, fd({ email: "tom@x.test", password: "wrong-password" }))).error ?? "", /incorrect/);
+});
+
+test("teachers sign each row but never change the student's entries; the admin signs the bottom", async () => {
+  const kevin = await studentByName("Kevin Reid");
+  const d2 = sheet.addDays(today, -2);
+  const key = `${kevin!._id}:${d2}`;
+  // The student's own row, without a student signature yet.
+  await db.collection("entries").insertOne({ _id: key, studentId: kevin!._id, date: d2, status: "PRESENT", startAt: null, endAt: null, startTime: "09:00", endTime: "13:00", minutes: 240, studentSignature: null, staffSignature: null, note: "", history: [], comments: [], updatedAt: new Date() } as any);
+  await db.collection("students").updateOne({ _id: kevin!._id }, { $set: { signatureId: sigIds.teacher } }); // any image on file
+  const before = await db.collection("entries").findOne({ _id: key as any });
+
+  await asStaff(ids.teacher);
+  const blocked = /can't change a student's entries/;
+  assert.match((await S.editRowAction(kevin!._id, d2, {}, fd({ status: "ABSENT", reason: "teacher thinks so" }))).error ?? "", blocked);
+  assert.match((await S.markAbsentAction(today, {}, fd({ students: JSON.stringify([kevin!._id]) }))).error ?? "", blocked);
+  assert.match((await S.fillStudentSignatureAction(key)).error ?? "", blocked);
+  assert.match((await S.fillStudentSignaturesAction([key])).error ?? "", blocked);
+  assert.match((await S.replaceRowSignatureAction(key, "student")).error ?? "", blocked);
+  assert.equal(await redirected(A.setStudentSignatureAction(kevin!._id, {}, fd({ signature: SIG }))), "/teacher");
+  const after = await db.collection("entries").findOne({ _id: key as any });
+  assert.deepEqual(after, before, "the row is exactly as the student left it");
+  assert.equal(await db.collection("entries").countDocuments({ date: today, status: "ABSENT", studentId: kevin!._id }), 0);
+
+  // What a teacher does do: sign the row's staff signature, and comment.
+  const sign = new FormData(); sign.set("rows", JSON.stringify([key]));
+  let r = await S.signRowsAction({}, sign);
+  assert.ok(r.ok, JSON.stringify(r));
+  const signed = await db.collection("entries").findOne({ _id: key as any });
+  assert.equal(signed!.staffSignature.staffId, ids.teacher);
+  assert.equal(signed!.studentSignature, null, "the student's signature is still theirs to add");
+  assert.equal(signed!.startTime, "09:00");
+  r = await S.addCommentAction(key, {}, fd({ text: "Arrived on time" }));
+  assert.ok(r.ok, JSON.stringify(r));
+  assert.equal((await db.collection("entries").findOne({ _id: key as any }))!.comments.at(-1).byRole, "TEACHER");
+
+  // The bottom of the sheet ("Approved by") is the admin's: Mahek signs it, the teacher can't.
+  const month = d2.slice(0, 7);
+  r = await S.approveMonthAction(kevin!._id, month, {}, fd({ staffName: "Tom Teacher", comments: "x", signature: SIG }));
+  assert.match(r.error ?? "", /signed by an admin/);
+  await asStaff(ids.mahek);
+  r = await S.approveMonthAction(kevin!._id, month, {}, fd({ staffName: " ", position: "Asst. Director", comments: "x" }));
+  assert.ok(r.fieldErrors?.staffName, "a name is needed for the Approved by block");
+  r = await S.approveMonthAction(kevin!._id, month, {}, fd({ staffName: "Mahek  Shah", position: "Asst. Director", comments: "Good month", signature: SIG }));
+  assert.ok(r.ok, JSON.stringify(r));
+  const a = await db.collection("month_approvals").findOne({ _id: `${kevin!._id}:${month}` as any });
+  assert.equal(a!.staffName, "Mahek Shah");
+  assert.equal(a!.position, "Asst. Director");
+  assert.equal(a!.staffId, ids.mahek, "the account that approved is always recorded");
+  const log = await db.collection("audit_logs").findOne({ action: "staff.approve_month", target: `${kevin!._id}:${month}` }, { sort: { at: -1 } });
+  assert.equal(log!.meta.account, "Mahek");
+
+  // The review list reflects it.
+  const T = await import("../../src/lib/teacher");
+  const staffDoc = (await db.collection("staff").findOne({ _id: ids.teacher as any })) as any;
+  const rows = await T.reviewMonth(staffDoc, month, "Office");
+  assert.ok(rows.every((x: any) => x.course === "Office"), "only the course asked for");
+  assert.equal(rows.find((x: any) => x.id === kevin!._id)!.approval, "approved");
+  assert.equal((await T.reviewMonth(staffDoc, month, "Night")).length, 0, "not the teacher's course");
+  await db.collection("month_approvals").deleteOne({ _id: `${kevin!._id}:${month}` as any });
+});
+
+// ---------------------------------------------------------------- Students fill in earlier days
+
+test("a student can fill in an earlier class day they forgot; teachers see it flagged", async () => {
+  await asStaff(ids.admin);
+  const r0 = await A.saveStudentAction(null, {}, studentForm("Pat Past", "Office", "7391"));
+  assert.ok(r0.ok, JSON.stringify(r0));
+  const pat = await studentByName("Pat Past");
+  const [d1, d2, d4] = [1, 2, 4].map((n) => sheet.addDays(today, -n));
+  await S.markAbsentAction(d1, {}, fd({ students: JSON.stringify([pat!._id]) }));
+  await asStudent(pat!._id);
+  const good = { startTime: "09:00", endTime: "13:30", signature: SIG };
+
+  let r = await ST.studentFillPastDayAction(today, {}, fd(good));
+  assert.match(r.error ?? "", /For today/);
+  r = await ST.studentFillPastDayAction(sheet.addDays(today, 1), {}, fd(good));
+  assert.match(r.error ?? "", /hasn't happened/);
+  r = await ST.studentFillPastDayAction(d10, {}, fd(good));
+  assert.match(r.error ?? "", /locked/);
+  r = await ST.studentFillPastDayAction(d4, {}, fd({ startTime: "09:00", endTime: "13:30" }));
+  assert.ok(r.fieldErrors?.signature);
+  r = await ST.studentFillPastDayAction(d4, {}, fd({ ...good, endTime: "08:00" }));
+  assert.ok(r.fieldErrors?.endTime);
+  assert.equal(await db.collection("entries").countDocuments({ studentId: pat!._id, date: d4 }), 0, "nothing saved on a mistake");
+  r = await ST.studentFillPastDayAction(d1, {}, fd(good));
+  assert.match(r.error ?? "", /marked absent/, "an admin's decision is left alone");
+
+  r = await ST.studentFillPastDayAction(d4, {}, fd({ ...good, note: "Tablet was broken" }));
+  assert.ok(r.ok, JSON.stringify(r));
+  const e = await db.collection("entries").findOne({ _id: `${pat!._id}:${d4}` as any });
+  assert.equal(e!.status, "PRESENT");
+  assert.equal(e!.minutes, 270);
+  assert.ok(e!.filledLaterAt instanceof Date);
+  assert.ok(e!.studentSignature?.id);
+  assert.equal(e!.staffSignature, null);
+  assert.equal(e!.comments[0].text, "Tablet was broken");
+  assert.equal(e!.comments[0].byRole, "STUDENT");
+  assert.ok(await db.collection("audit_logs").findOne({ action: "student.fill_past_day", target: `${pat!._id}:${d4}` }));
+  r = await ST.studentFillPastDayAction(d4, {}, fd({ ...good, startTime: "07:00" }));
+  assert.match(r.message ?? "", /already filled in/);
+  assert.equal((await db.collection("entries").findOne({ _id: `${pat!._id}:${d4}` as any }))!.startTime, "09:00", "not overwritten");
+
+  // An approved month is closed to filling in.
+  await db.collection("month_approvals").insertOne({ _id: `${pat!._id}:${d2.slice(0, 7)}`, studentId: pat!._id, month: d2.slice(0, 7), staffId: ids.teacher, staffName: "Tom Teacher", position: "", signatureId: sigIds.teacher, comments: "", entriesHash: "x", signedAt: new Date() } as any);
+  r = await ST.studentFillPastDayAction(d2, {}, fd(good));
+  assert.match(r.error ?? "", /already approved/);
+  await db.collection("month_approvals").deleteOne({ _id: `${pat!._id}:${d2.slice(0, 7)}` as any });
+
+  // The days still open to fill in, for the reminder on the student's sheet.
+  const data = await import("../../src/lib/data");
+  const policy = await import("../../src/lib/policy");
+  const missed: string[] = await data.missedDays(pat as any, policy.firstOpenDate());
+  assert.ok(missed.includes(d2) && !missed.includes(d4) && !missed.includes(d1) && !missed.includes(today));
+
+  // The teacher sees it flagged until they sign it.
+  const T = await import("../../src/lib/teacher");
+  const staffDoc = (await db.collection("staff").findOne({ _id: ids.teacher as any })) as any;
+  const row = async () => (await T.reviewMonth(staffDoc, d4.slice(0, 7), "Office")).find((x: any) => x.id === pat!._id);
+  assert.equal((await row())!.filledLater, 1);
+  await asStaff(ids.teacher);
+  const sign = new FormData(); sign.set("rows", JSON.stringify([`${pat!._id}:${d4}`]));
+  assert.ok((await S.signRowsAction({}, sign)).ok);
+  assert.equal((await row())!.filledLater, 0);
+});
+
+// ---------------------------------------------------------------- Handwritten signatures, roles
+
+test("signatures on file are always handwritten, even if a client claims a photo upload", async () => {
+  await asStaff(ids.teacher);
+  let r = await S.saveMySignatureAction({}, fd({ signature: SIG, source: "UPLOAD" }));
+  assert.ok(r.ok, JSON.stringify(r));
+  const t = await db.collection("staff").findOne({ _id: ids.teacher as any });
+  assert.equal((await db.collection("signatures").findOne({ _id: t!.signatureId }))!.source, "DRAWN");
+  const kevin = await studentByName("Kevin Reid");
+  await asStaff(ids.admin);
+  r = await A.setStudentSignatureAction(kevin!._id, {}, fd({ signature: SIG, source: "UPLOAD" }));
+  assert.ok(r.ok, JSON.stringify(r));
+  const k = await db.collection("students").findOne({ _id: kevin!._id });
+  assert.equal((await db.collection("signatures").findOne({ _id: k!.signatureId }))!.source, "DRAWN");
+  await db.collection("staff").updateOne({ _id: ids.teacher as any }, { $set: { signatureId: sigIds.teacher } });
+});
+
+test("an admin can make an account an admin or a teacher, but not change their own", async () => {
+  await asStaff(ids.admin);
+  let r = await A.createStaffAction({}, fd({ name: "Sam Switch", email: "sam@x.test", position: "", role: "TEACHER", password: "password-123456" }));
+  assert.ok(r.ok, JSON.stringify(r));
+  const sam = await db.collection("staff").findOne({ email: "sam@x.test" });
+  r = await A.setStaffRoleAction(sam!._id, {}, fd({ role: "ADMIN" }));
+  assert.ok(r.ok, JSON.stringify(r));
+  assert.equal((await db.collection("staff").findOne({ _id: sam!._id }))!.role, "ADMIN");
+  assert.ok(await db.collection("audit_logs").findOne({ action: "admin.set_role", target: sam!._id }));
+  assert.match((await A.setStaffRoleAction(ids.admin, {}, fd({ role: "TEACHER" }))).error ?? "", /your own role/);
+  await asStaff(ids.teacher);
+  assert.equal(await redirected(A.setStaffRoleAction(ids.teacher, {}, fd({ role: "ADMIN" }))), "/teacher");
+  assert.equal((await db.collection("staff").findOne({ _id: ids.teacher as any }))!.role, "TEACHER");
 });

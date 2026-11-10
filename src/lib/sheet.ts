@@ -268,6 +268,30 @@ export function checkTypedTime(
   return { ok: true, time: t, lateBy: nowMinutes - m };
 }
 
+/**
+ * Times a student enters for a past class day they forgot to fill in. The server's clock can't
+ * vouch for them, so the row is flagged for review; these checks only refuse what can't be right:
+ * an unreadable time, an end that isn't after the start, or a day shorter or longer than allowed.
+ */
+export function checkPastDayTimes(
+  rawStart: unknown, rawEnd: unknown, rules: Pick<TimeRules, "minMinutes" | "maxMinutes">,
+): { ok: true; start: string; end: string; minutes: number } | { ok: false; field: "startTime" | "endTime"; error: string } {
+  const start = parseTime(rawStart);
+  if (!start) return { ok: false, field: "startTime", error: "Enter the time you arrived, like 9:05 am." };
+  const end = parseTime(rawEnd);
+  if (!end) return { ok: false, field: "endTime", error: "Enter the time you left, like 2:30 pm." };
+  const minutes = minutesBetween(start, end);
+  if (minutes === null) {
+    // 9:00 to 1:00 most likely means 1:00 pm.
+    const pm = toMinutes(end) + 720;
+    if (pm < 24 * 60 && pm > toMinutes(start)) return { ok: false, field: "endTime", error: `Your end time must be after ${time12(start)}. Did you mean ${time12(hhmm(pm))}?` };
+    return { ok: false, field: "endTime", error: `Your end time must be after your start time (${time12(start)}).` };
+  }
+  if (minutes < rules.minMinutes) return { ok: false, field: "endTime", error: `That's only ${minutes} minute${minutes === 1 ? "" : "s"}. Check the times.` };
+  if (minutes > rules.maxMinutes) return { ok: false, field: "endTime", error: `That's more than ${hoursText(rules.maxMinutes)} hours. Ask a staff member.` };
+  return { ok: true, start, end, minutes };
+}
+
 // ---------- Seven-day editing window ----------
 
 /** "2026-09-01" + 7 -> "2026-09-08". */

@@ -8,9 +8,9 @@ import { audit, cols, isDuplicateKey, newId, rateLimit, type Entry, type RowComm
 import { currentStudent, endStudentSession, startStudentSession } from "@/lib/auth";
 import { env } from "@/lib/env";
 import { holidaysBetween, schoolMinutes, timeRules } from "@/lib/data";
-import { DATE_RE, checkTypedTime, hoursText, isClassDay, minutesBetween, time12, todayIn, usDate } from "@/lib/sheet";
+import { DATE_RE, checkPastDayTimes, checkTypedTime, hoursText, isClassDay, minutesBetween, time12, todayIn, usDate } from "@/lib/sheet";
 import { checkNotePng, checkSignaturePng, checkTimePng, saveSignature } from "@/lib/signatures";
-import { isLocked } from "@/lib/policy";
+import { editWindowDays, isLocked } from "@/lib/policy";
 import type { ActionState } from "@/lib/action";
 
 /** Student taps their name, then enters their PIN. */
@@ -91,7 +91,7 @@ export async function studentStartAction(_: ActionState, fd: FormData): Promise<
       const e2 = await entries.findOne({ _id: t.id });
       if (e2?.startTime) return { ok: true, message: `Your start time is already on the sheet: ${time12(e2.startTime)}.` };
       if (e2?.status === "HOLIDAY") return { error: `Today is marked as a holiday for your class${e2.note ? ` (${e2.note})` : ""}. Ask a staff member if that's wrong.` };
-      return { error: "Today's row is already signed by staff. Ask a staff member." };
+      return { error: "Your teacher has already signed today's row. Ask a staff member." };
     }
   }
   await audit(t.student._id, "student.start", t.id, { clock: startTime, startInkId, savedAt: now.toISOString() });
@@ -166,7 +166,7 @@ export async function studentRewriteTimeAction(which: "start" | "end", _: Action
   const e = await entries.findOne({ _id: t.id });
   const time = which === "start" ? e?.startTime : e?.endTime;
   if (!e || e.status !== "PRESENT" || !time) return { error: `There's no ${which} time to change yet.` };
-  if (e.staffSignature) return { error: "Staff have already signed today. Ask a staff member to change it." };
+  if (e.staffSignature) return { error: "Your teacher has already signed today. Ask a staff member to change it." };
   const field = which === "start" ? "startInkId" : "endInkId";
   const before = e[field] ?? null;
   const inkId = await saveSignature("STUDENT", t.student._id, ink.png, "DRAWN", t.student._id, "TIME");
@@ -203,7 +203,7 @@ export async function studentSignRowAction(date: string, _: ActionState, fd: For
   const e = await entries.findOne({ _id: id });
   if (!e || e.status !== "PRESENT" || !e.startTime || !e.endTime) return { error: "This day needs a start and end time before you sign it." };
   if (e.studentSignature) return { ok: true, message: "This day is already signed." };
-  if (e.staffSignature) return { error: "Staff have already signed this day. Ask a staff member." };
+  if (e.staffSignature) return { error: "Your teacher has already signed this day. Ask a staff member." };
   const signatureId = await saveDailySignature(student, sig.png);
   const now = new Date();
   const res = await entries.updateOne(
@@ -217,6 +217,61 @@ export async function studentSignRowAction(date: string, _: ActionState, fd: For
   await audit(student._id, "student.sign_row", id, { signatureId });
   revalidatePath("/student/sheet");
   return { ok: true, message: `${usDate(date)} signed.` };
+}
+
+/**
+ * The student fills in a past class day they forgot: start and end time (typed), their signature,
+ * and optionally why it's late. Only days with nothing recorded yet, still inside the editing
+ * window, in a month that isn't approved. The row is marked "filled in later" so the teacher
+ * reviews it before signing; staff signatures and approvals are never touched here.
+ */
+export async function studentFillPastDayAction(date: string, _: ActionState, fd: FormData): Promise<ActionState> {
+  const now = new Date();
+  const student = await currentStudent();
+  if (!student) return { error: "You were signed out. Find your name again." };
+  if (!DATE_RE.test(date)) return { error: "Invalid day." };
+  const today = todayIn(env().APP_TIMEZONE, now);
+  if (date > today) return { error: "You can't fill in a day that hasn't happened yet." };
+  if (date === today) return { error: "For today, use “Enter start time” and “Enter end time”." };
+  if (isLocked(date)) return { error: `${usDate(date)} is more than ${editWindowDays()} days ago, so it's locked. Ask an admin.` };
+  if (!isClassDay(student, date)) return { error: `${usDate(date)} isn't one of your class days.` };
+  const holiday = (await holidaysBetween(date, date)).get(date);
+  if (holiday) return { error: `${usDate(date)} is a holiday (${holiday}).` };
+  if (!(await rateLimit(`time:${student._id}`, 30, 600))) return { error: "Too many tries. Wait a few minutes, or ask a staff member." };
+  const { entries, approvals } = await cols();
+  if (await approvals.findOne({ _id: `${student._id}:${date.slice(0, 7)}` }, { projection: { _id: 1 } })) {
+    return { error: "This month is already approved, so it can't be filled in now. Ask an admin." };
+  }
+  const times = checkPastDayTimes(fd.get("startTime"), fd.get("endTime"), timeRules());
+  if (!times.ok) return { error: times.error, fieldErrors: { [times.field]: times.error } };
+  const sig = checkSignaturePng(fd.get("signature"));
+  if ("error" in sig) return { error: "Sign in the box before saving.", fieldErrors: { signature: sig.error } };
+  const text = String(fd.get("note") ?? "").trim().slice(0, 500);
+  const id = `${student._id}:${date}`;
+  const taken = (e: Pick<Entry, "status" | "startTime"> | null): ActionState =>
+    e?.startTime ? { ok: true, message: `${usDate(date)} is already filled in.` } : { error: `${usDate(date)} is marked ${e?.status.toLowerCase() ?? "already"}. Ask an admin if that's wrong.` };
+  const before = await entries.findOne({ _id: id }, { projection: { status: 1, startTime: 1 } });
+  if (before) return taken(before);
+  const signatureId = await saveDailySignature(student, sig.png);
+  const comments: RowComment[] = text ? [{ id: newId(), at: now, byId: student._id, byName: student.name, byRole: "STUDENT", text, inkId: null }] : [];
+  const row: Entry = {
+    _id: id, studentId: student._id, date, status: "PRESENT", startAt: now, endAt: now, startTime: times.start, endTime: times.end, minutes: times.minutes,
+    startInkId: null, endInkId: null, startLateBy: null, endLateBy: null, filledLaterAt: now,
+    studentSignature: { id: signatureId, at: now }, staffSignature: null, note: "", comments, updatedAt: now,
+    history: [{ at: now, byId: student._id, byName: student.name, what: `filled in later: ${time12(times.start)}-${time12(times.end)}`, reason: text || "filled in later by student" }],
+  };
+  try {
+    await entries.insertOne(row);
+  } catch (e) {
+    if (!isDuplicateKey(e)) throw e;
+    // Recorded in the meantime (a double tap, or an admin marked the day): leave it as it is.
+    return taken(await entries.findOne({ _id: id }, { projection: { status: 1, startTime: 1 } }));
+  }
+  await audit(student._id, "student.fill_past_day", id, { startTime: times.start, endTime: times.end, minutes: times.minutes, signatureId, savedAt: now.toISOString(), note: !!text });
+  revalidatePath("/student/sheet");
+  revalidatePath("/teacher", "layout");
+  revalidatePath("/admin", "layout");
+  return { ok: true, message: `${usDate(date)} filled in: ${hoursText(times.minutes)} hours, signed. Your teacher will review it.` };
 }
 
 /** The student adds a note to today's row: typed, handwritten, or both. */

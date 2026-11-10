@@ -121,7 +121,7 @@ export function TimeEntry({ kind, clock, start, action, onDone, onCancel, rewrit
         <p className="small muted">
           {rewrite
             ? <>Only your handwriting changes. The school clock time ({time12(rewrite.time)}) and your hours stay the same, and staff can see that you rewrote it.</>
-            : <>The school clock time ({time12(hhmm(now))}) is saved with your handwriting and used for your hours. You can write it again today, until staff sign your row.</>}
+            : <>The school clock time ({time12(hhmm(now))}) is saved with your handwriting and used for your hours. You can write it again today, until your teacher signs your row.</>}
         </p>
         {!timing.ok && <p className="msg err" role="alert">{timing.error}</p>}
         {error && <p className="msg err" role="alert">{error}</p>}

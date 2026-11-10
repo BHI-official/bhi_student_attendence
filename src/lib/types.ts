@@ -11,7 +11,7 @@ export type Staff = {
   /** Teachers see only students of these courses (by course name). Admins see everyone. */
   courses: string[];
   passwordHash: string;
-  /** The signature on file (uploaded or drawn once), used to sign rows and approvals. */
+  /** The handwritten signature on file, used to sign rows (teachers) and month approvals (admins). */
   signatureId: string | null;
   active: boolean;
   createdAt: Date;
@@ -66,6 +66,7 @@ export type SignatureDoc = {
   ownerType: "STUDENT" | "STAFF";
   ownerId: string;
   png: string; // data:image/png;base64,...
+  /** Always DRAWN now (signed on the screen). UPLOAD only on older records from when photos were allowed. */
   source: "UPLOAD" | "DRAWN";
   /**
    * A signature, handwriting written into a note / comment field, or a start / end time the
@@ -73,7 +74,7 @@ export type SignatureDoc = {
    */
   kind?: "SIGNATURE" | "NOTE" | "TIME";
   createdAt: Date;
-  createdBy: string; // who put it on file (the person, or the staff member who uploaded it for them)
+  createdBy: string; // who put it on file (the person, or the admin whose screen the student signed on)
 };
 export type Signature = {
   id: string;
@@ -124,6 +125,11 @@ export type Entry = {
    */
   startLateBy?: number | null;
   endLateBy?: number | null;
+  /**
+   * Set when the student filled in a past class day afterwards (they forgot on the day). The times
+   * are as the student typed them, so the row is flagged for the teacher's review. Missing = no.
+   */
+  filledLaterAt?: Date | null;
   minutes: number | null;
   studentSignature: Signature | null;
   staffSignature: StaffSignature | null;

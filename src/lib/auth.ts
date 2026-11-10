@@ -43,10 +43,33 @@ export async function currentStaff(): Promise<Staff | null> {
   const staff = await (await cols()).staff.findOne({ _id: c.sid, active: true });
   return staff && staff.passwordHash.slice(-12) === c.pv ? staff : null;
 }
-export async function requireStaff(role?: "ADMIN"): Promise<Staff> {
+/** Where each portal signs in, and its home page. */
+export const PORTAL = {
+  ADMIN: { home: "/admin", login: "/admin/login" },
+  TEACHER: { home: "/teacher", login: "/teacher/login" },
+} as const;
+
+/**
+ * Any signed-in admin or teacher. Used by actions both roles may take (sign the staff column,
+ * comment, approve a month, their own account). Pages use requireAdmin / requireTeacher.
+ */
+export async function requireStaff(): Promise<Staff> {
   const staff = await currentStaff();
-  if (!staff) redirect("/staff/login");
-  if (role === "ADMIN" && staff.role !== "ADMIN") redirect("/staff");
+  if (!staff) redirect(PORTAL.ADMIN.login);
+  return staff;
+}
+/** Admins only. A teacher who reaches an admin page is sent to the teacher portal. */
+export async function requireAdmin(): Promise<Staff> {
+  const staff = await currentStaff();
+  if (!staff) redirect(PORTAL.ADMIN.login);
+  if (staff.role !== "ADMIN") redirect(PORTAL.TEACHER.home);
+  return staff;
+}
+/** Teachers only. An admin who reaches a teacher page is sent to the admin portal. */
+export async function requireTeacher(): Promise<Staff> {
+  const staff = await currentStaff();
+  if (!staff) redirect(PORTAL.TEACHER.login);
+  if (staff.role !== "TEACHER") redirect(PORTAL.ADMIN.home);
   return staff;
 }
 
