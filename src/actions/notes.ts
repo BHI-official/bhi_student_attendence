@@ -26,7 +26,7 @@ export async function addStudentNoteAction(studentId: string, _: ActionState, fd
   const text = String(fd.get("text") ?? "").trim();
   if (!text) return { error: "Write the note first.", fieldErrors: { text: "Write the note first." } };
   if (text.length > MAX_NOTE) return { error: `Keep the note under ${MAX_NOTE} characters.`, fieldErrors: { text: `Under ${MAX_NOTE} characters, please.` } };
-  const date = String(fd.get("date") ?? "").trim() || today();
+  const date = String(fd.get("date") ?? "").trim() || today()
   // A note can be about a past day or a planned one (e.g. an upcoming absence), within reason.
   if (!DATE_RE.test(date) || date < "2000-01-01" || date > addDays(today(), 366)) {
     return { error: "Choose a valid date.", fieldErrors: { date: "Choose a valid date." } };
