@@ -29,6 +29,7 @@ async function main() {
   await idx("entries", { date: 1 });
   await idx("signatures", { ownerId: 1, createdAt: -1 });
   await idx("month_approvals", { studentId: 1, month: 1 });
+  await idx("student_notes", { studentId: 1, date: -1, createdAt: -1 });
   await idx("audit_logs", { target: 1, at: -1 });
   await idx("rate_limits", { expiresAt: 1 }, { expireAfterSeconds: 0 });
   console.log("Indexes ready.");

@@ -3,7 +3,7 @@ import dns from "node:dns";
 import { randomUUID } from "node:crypto";
 import { MongoClient, type Collection } from "mongodb";
 import { env } from "./env";
-import type { AuditLog, Entry, Holiday, MonthApproval, SignatureDoc, Staff, Student } from "./types";
+import type { AuditLog, Entry, Holiday, MonthApproval, SignatureDoc, Staff, Student, StudentNote } from "./types";
 
 export * from "./types";
 
@@ -33,6 +33,7 @@ export async function cols() {
     entries: db.collection<Entry>("entries"),
     holidays: db.collection<Holiday>("holidays"),
     approvals: db.collection<MonthApproval>("month_approvals"),
+    notes: db.collection<StudentNote>("student_notes"),
     signatures: db.collection<SignatureDoc>("signatures"),
     audit: db.collection<AuditLog>("audit_logs"),
     limits: db.collection<{ _id: string; count: number; expiresAt: Date }>("rate_limits"),

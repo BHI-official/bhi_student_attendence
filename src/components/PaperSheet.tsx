@@ -43,6 +43,11 @@ type Props = {
   staffId?: string;
   /** Staff mode: what the "Approved by" form starts with (the account's name and position). */
   staffPosition?: string;
+  /**
+   * Student mode: every past day of their course (across months) that still needs something from
+   * them, newest first, for the "Days to fill in" panel above the sheet.
+   */
+  daysToFill?: { row: SheetRow; todo: "fill" | "finish" | "sign" }[];
 };
 
 const STATUS_WORD: Record<string, string> = { ABSENT: "Absent", EXCUSED: "Excused", HOLIDAY: "Holiday" };
@@ -83,8 +88,11 @@ export function PaperSheet(p: Props) {
   const canSignRow = (r: SheetRow) => p.mode === "teacher" && !r.isFuture;
   /** Admin or teacher: may comment (teachers only while the row is open). */
   const canComment = (r: SheetRow) => staff && !r.isFuture && (!locked(r) || admin);
-  /** Student: a past class day with nothing recorded, still open, in a month not yet approved. */
-  const canFillPast = (r: SheetRow) => !staff && !r.isToday && !r.isFuture && !locked(r) && !r.holiday && !r.entry && !p.approval;
+  /** Student: a past class day with nothing recorded, in a month not yet approved. No time limit. */
+  const canFillPast = (r: SheetRow) => !staff && !r.isToday && !r.isFuture && !r.holiday && !r.entry && !p.approval;
+  /** Student: a past class day they started but never ended, not yet signed by staff. No time limit. */
+  const canFinishPast = (r: SheetRow) => !staff && !r.isToday && !r.isFuture && !r.holiday && !p.approval
+    && !!r.entry && r.entry.status === "PRESENT" && !!r.entry.startTime && !r.entry.endTime && !r.entry.staffSignature;
 
   const run = (fn: () => Promise<ActionState>) =>
     start(async () => {
@@ -96,6 +104,7 @@ export function PaperSheet(p: Props) {
   const todayRow = p.rows.find((r) => r.isToday);
   const studentCell = (r: SheetRow, col: "start" | "end") => {
     if (col === "start" && canFillPast(r)) return <button className="fill go no-print" disabled={pending} onClick={() => setPastFor(r)}>Fill in this day</button>;
+    if (col === "end" && canFinishPast(r)) return <button className="fill go no-print" disabled={pending} onClick={() => setPastFor(r)}>Add end time</button>;
     if (staff || !r.isToday || r.holiday || !p.clock) return null;
     const e = r.entry;
     if (e && e.status !== "PRESENT") return null;
@@ -105,8 +114,8 @@ export function PaperSheet(p: Props) {
   };
   /** Student: their own time today can be written again until staff sign the row. */
   const canRewrite = (r: SheetRow) => !staff && r.isToday && !r.holiday && !!p.clock && !!r.entry && r.entry.status === "PRESENT" && !r.entry.staffSignature;
-  /** Student: a day of theirs with both times but no signature yet, still open, not yet validated by staff. */
-  const studentCanSign = (r: SheetRow) => !staff && !r.isFuture && !locked(r) && !r.holiday && !!r.entry && r.entry.status === "PRESENT"
+  /** Student: a day of theirs with both times but no signature yet, not yet validated by staff. No time limit. */
+  const studentCanSign = (r: SheetRow) => !staff && !r.isFuture && !r.holiday && !!r.entry && r.entry.status === "PRESENT"
     && !!r.entry.startTime && !!r.entry.endTime && !r.entry.studentSignature && !r.entry.staffSignature;
   const startForEnd = (() => {
     const e = todayRow?.entry;
@@ -189,6 +198,14 @@ export function PaperSheet(p: Props) {
           // Only your own older signature is updated, and only on open rows: others' signatures (and history) stay.
           staffOutdated={p.staffSignatureId ? p.rows.filter((r) => !locked(r) && !isHoliday(r) && r.entry?.staffSignature && r.entry.staffSignature.staffId === p.staffId && r.entry.staffSignature.id !== p.staffSignatureId).map((r) => key(r.date)) : []}
           run={run}
+        />
+      )}
+
+      {!staff && p.daysToFill && p.daysToFill.length > 0 && (
+        <DaysToFillPanel
+          days={p.daysToFill} pending={pending}
+          onFill={(d) => setPastFor(d.row)}
+          onSign={(d) => setHandFor({ who: "student", date: d.row.date })}
         />
       )}
 
@@ -347,7 +364,7 @@ export function PaperSheet(p: Props) {
         );
       })()}
       {pastFor && (
-        <PastDayDialog row={pastFor} onCancel={() => setPastFor(null)} onDone={(r) => { setPastFor(null); setMsg(r); router.refresh(); }}
+        <PastDayDialog row={pastFor} knownStart={pastFor.entry?.startTime ?? undefined} onCancel={() => setPastFor(null)} onDone={(r) => { setPastFor(null); setMsg(r); router.refresh(); }}
           submit={(fd) => studentFillPastDayAction(pastFor.date, {}, fd)} />
       )}
       {editing && <EditRow studentId={s._id} row={editing} locked={locked(editing)} onClose={() => { setEditing(null); router.refresh(); }} />}
@@ -501,10 +518,13 @@ function CommentsDialog({ row, images, canAdd, onSubmit, onClose }: {
  * Student: fill in a past class day they forgot. Typed start and end time, their signature, and
  * optionally why it's late. Hours are shown as they type so mistakes are easy to spot.
  */
-function PastDayDialog({ row, submit, onCancel, onDone }: {
-  row: SheetRow; submit: (fd: FormData) => Promise<ActionState>; onCancel: () => void; onDone: (r: ActionState) => void;
+function PastDayDialog({ row, knownStart, submit, onCancel, onDone }: {
+  row: SheetRow;
+  /** The start time already recorded (they started the day but never ended it). Only the end is asked for. */
+  knownStart?: string;
+  submit: (fd: FormData) => Promise<ActionState>; onCancel: () => void; onDone: (r: ActionState) => void;
 }) {
-  const [startTime, setStart] = useState("");
+  const [startTime, setStart] = useState(knownStart ?? "");
   const [endTime, setEnd] = useState("");
   const [note, setNote] = useState("");
   const [sig, setSig] = useState<InkValue>(null);
@@ -530,10 +550,18 @@ function PastDayDialog({ row, submit, onCancel, onDone }: {
       onKeyDown={(e) => { if (e.key === "Escape" && !document.querySelector(".inkmodal")) onCancel(); }}>
       <form className="panel" style={{ width: "min(520px, 100%)", margin: 0, maxHeight: "100%", overflow: "auto" }} onSubmit={send}>
         <h2 style={{ marginTop: 0 }}>{row.weekdayName}, {usDate(row.date)}</h2>
-        <p className="small muted" style={{ marginTop: 0 }}>Enter the times you were in class that day. Your teacher reviews days filled in later before signing them.</p>
+        <p className="small muted" style={{ marginTop: 0 }}>
+          {knownStart
+            ? <>You entered your start time that day but no end time. Enter the time you left and sign. Your teacher reviews days finished later before signing them.</>
+            : <>Enter the times you were in class that day. Your teacher reviews days filled in later before signing them.</>}
+        </p>
         <div className="grid2">
-          <div className="field"><label htmlFor="pd1">Start time</label><input id="pd1" type="time" value={startTime} onChange={(e) => setStart(e.target.value)} required />
-            {state.fieldErrors?.startTime && <span className="err">{state.fieldErrors.startTime}</span>}</div>
+          {knownStart ? (
+            <div className="field"><span className="label-like">Start time</span><p style={{ margin: "6px 0 0", fontWeight: 700 }}>{time12(knownStart)}</p></div>
+          ) : (
+            <div className="field"><label htmlFor="pd1">Start time</label><input id="pd1" type="time" value={startTime} onChange={(e) => setStart(e.target.value)} required />
+              {state.fieldErrors?.startTime && <span className="err">{state.fieldErrors.startTime}</span>}</div>
+          )}
           <div className="field"><label htmlFor="pd2">End time</label><input id="pd2" type="time" value={endTime} onChange={(e) => setEnd(e.target.value)} required />
             {state.fieldErrors?.endTime && <span className="err">{state.fieldErrors.endTime}</span>}</div>
         </div>
@@ -553,6 +581,54 @@ function PastDayDialog({ row, submit, onCancel, onDone }: {
         </div>
       </form>
     </div>
+  );
+}
+
+/**
+ * Student: every past day of their course that still needs something from them (filling in, an
+ * end time, or their signature), across months, newest first. The most recent few are shown; the
+ * rest open with "Show more". There is no time limit: they can catch up whenever they get to it.
+ */
+const DAYS_SHOWN = 8;
+function DaysToFillPanel({ days, pending, onFill, onSign }: {
+  days: { row: SheetRow; todo: "fill" | "finish" | "sign" }[];
+  pending: boolean;
+  onFill: (d: { row: SheetRow }) => void;
+  onSign: (d: { row: SheetRow }) => void;
+}) {
+  const item = (d: { row: SheetRow; todo: "fill" | "finish" | "sign" }) => {
+    const e = d.row.entry;
+    const [text, button] =
+      d.todo === "fill" ? ["Nothing recorded yet", <button key="b" type="button" className="btn" disabled={pending} onClick={() => onFill(d)}>Fill in this day</button>]
+      : d.todo === "finish" ? [`Started ${time12(e!.startTime)}, no end time yet`, <button key="b" type="button" className="btn" disabled={pending} onClick={() => onFill(d)}>Add end time</button>]
+      : [`${time12(e!.startTime)} to ${time12(e!.endTime)}, ${hoursText(e!.minutes)} h. Needs your signature`, <button key="b" type="button" className="btn" disabled={pending} onClick={() => onSign(d)}>Sign</button>];
+    return (
+      <li key={d.row.date}>
+        <span className="pastweek-day"><b>{d.row.weekdayName}</b> {usDate(d.row.date)}</span>
+        <span className="pastweek-status is-warn">{text}</span>
+        <span className="pastweek-act">{button}</span>
+      </li>
+    );
+  };
+  const shown = days.slice(0, DAYS_SHOWN);
+  const rest = days.slice(DAYS_SHOWN);
+  return (
+    <section className="panel no-print pastweek" aria-labelledby="dtf-title">
+      <div className="pastweek-head">
+        <h2 id="dtf-title">Days to fill in</h2>
+        <p className="small muted">
+          {days.length === 1 ? "1 earlier day needs" : `${days.length} earlier days need`} something from you. You can fill them in any time.
+          {" "}Your teacher reviews days filled in later before signing them.
+        </p>
+      </div>
+      <ul className="pastweek-list">{shown.map(item)}</ul>
+      {rest.length > 0 && (
+        <details className="pastweek-more">
+          <summary>Show {rest.length} more</summary>
+          <ul className="pastweek-list">{rest.map(item)}</ul>
+        </details>
+      )}
+    </section>
   );
 }
 

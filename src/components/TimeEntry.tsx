@@ -85,9 +85,7 @@ export function TimeEntry({ kind, clock, start, action, onDone, onCancel, rewrit
             {rewrite.ink && <img className="timeink" src={rewrite.ink} alt={`Your handwritten ${word} time`} />}
             <span className="small">The school clock recorded <strong>{time12(rewrite.time)}</strong>.</span>
           </div>
-        ) : (
-          <p className="clocknow" aria-live="off">It&apos;s <strong>{time12(hhmm(now))}</strong> now</p>
-        )}
+        ) : null}
 
         <div className="field">
           <span className="timepad-label" id="te-label">{rewrite ? `Write the right ${word} time` : `Write your ${word} time`}</span>
@@ -97,7 +95,7 @@ export function TimeEntry({ kind, clock, start, action, onDone, onCancel, rewrit
               onStroke={(s) => { setStrokes((x) => [...x, s]); setError(null); }}
               label={`Write your ${word} time here with your finger, a stylus or the mouse.`}
             />
-            {!written && <span className="timepad-ghost" aria-hidden>{time12(rewrite?.time ?? hhmm(now)).replace(" ", "")}</span>}
+            {!written && rewrite && <span className="timepad-ghost" aria-hidden>{time12(rewrite.time).replace(" ", "")}</span>}
           </div>
           <div className="row timepad-tools">
             <span id="te-help" className="small muted">Write it like you would on the paper sheet.</span>
@@ -121,7 +119,7 @@ export function TimeEntry({ kind, clock, start, action, onDone, onCancel, rewrit
         <p className="small muted">
           {rewrite
             ? <>Only your handwriting changes. The school clock time ({time12(rewrite.time)}) and your hours stay the same, and staff can see that you rewrote it.</>
-            : <>The school clock time ({time12(hhmm(now))}) is saved with your handwriting and used for your hours. You can write it again today, until your teacher signs your row.</>}
+            : <>The school clock is saved with your handwriting and used for your hours. You can write it again today, until your teacher signs your row.</>}
         </p>
         {!timing.ok && <p className="msg err" role="alert">{timing.error}</p>}
         {error && <p className="msg err" role="alert">{error}</p>}

@@ -2,9 +2,11 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requireTeacher } from "@/lib/auth";
 import { canSee } from "@/lib/access";
-import { loadSheet, sheetHeader, thisMonth } from "@/lib/data";
+import { loadSheet, sheetHeader, thisMonth, today } from "@/lib/data";
 import { MONTH_RE, monthTitle, shiftMonth } from "@/lib/sheet";
 import { PaperSheet } from "@/components/PaperSheet";
+import { StudentNotes } from "@/components/StudentNotes";
+import { loadStudentNotes } from "@/lib/notes";
 import { signatureImages } from "@/lib/signatures";
 import { editWindowDays, firstOpenDate } from "@/lib/policy";
 
@@ -26,7 +28,7 @@ export default async function TeacherSheet({ params, searchParams }: { params: P
   // Only ever link back inside the teacher portal.
   const back = raw.startsWith("/teacher/students") ? raw : `/teacher/students?${new URLSearchParams({ course: s.courseName, month })}`;
   const prev = shiftMonth(month, -1), next = shiftMonth(month, 1);
-  const onFile = await signatureImages([staff.signatureId]);
+  const [onFile, notes] = await Promise.all([signatureImages([staff.signatureId]), loadStudentNotes(s._id)]);
   const later = sheet.rows.filter((r) => r.entry?.filledLaterAt && !r.entry.staffSignature).length;
   return (
     <main className="wrap" style={{ maxWidth: 1040 }}>
@@ -48,6 +50,9 @@ export default async function TeacherSheet({ params, searchParams }: { params: P
         approval={sheet.approval} approvalCurrent={sheet.approvalCurrent} hasSavedSignature={!!staff.signatureId} images={{ ...sheet.images, ...onFile }}
         studentHasSignature={false} studentSignatureId={null} staffSignatureId={staff.signatureId} staffName={staff.name}
         staffId={staff._id} staffPosition={staff.position} firstOpenDate={firstOpenDate()} editWindowDays={editWindowDays()} />
+      <div style={{ maxWidth: 980, margin: "24px auto 0" }}>
+        <StudentNotes studentId={s._id} studentName={s.name} notes={notes} staff={staff} today={today()} />
+      </div>
     </main>
   );
 }

@@ -135,8 +135,6 @@ h2 { font-size: 21px; margin: 28px 0 10px; color: var(--navy-deep); }
 .rewrite-was { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 0 0 14px; }
 .rewrite-was .timeink { height: 40px; max-width: 160px; }
 .timebox h2 { margin-top: 0; }
-.clocknow { font-size: 20px; margin: 0 0 16px; }
-.clocknow strong { font-size: 28px; color: var(--navy-deep); }
 .timein { font-size: 30px !important; min-height: 64px !important; font-weight: 700; letter-spacing: .02em; }
 .confirmline { font-size: 20px; font-weight: 700; margin: 4px 0 10px; }
 .confirmline .hand { font-size: 34px; }
@@ -230,3 +228,42 @@ dialog .inner { padding: 20px; }
 .ratebar i.good { background: #1f9d55; } .ratebar i.attention { background: #f08c00; } .ratebar i.poor { background: #d92d20; }
 @media (max-width: 640px) { .profile-head { grid-template-columns: 1fr; } }
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+
+/* Student: "Your past week" panel above the sheet */
+.label-like { font-weight: 700; font-size: 15px; }
+.pastweek-act .btn { min-height: 40px; padding: 6px 14px; font-size: 15px; }
+.pastweek { max-width: 980px; margin: 0 auto 16px; }
+.pastweek-head h2 { margin: 0 0 4px; }
+.pastweek-head p { margin: 0 0 12px; }
+.pastweek-list { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
+.pastweek-list li {
+  display: grid; grid-template-columns: 190px minmax(0, 1fr) auto; align-items: center; gap: 6px 16px;
+  padding: 10px 0; border-bottom: 1px solid var(--line);
+}
+.pastweek-day { white-space: nowrap; }
+.pastweek-status { color: var(--muted); }
+.pastweek-status.is-warn { color: #6b5300; font-weight: 700; }
+.pastweek-status.is-ok { color: var(--ok); }
+.pastweek-status.is-no { color: var(--danger); }
+.pastweek-act { display: flex; gap: 8px; justify-content: flex-end; }
+@media (max-width: 640px) {
+  .pastweek-list li { grid-template-columns: 1fr; }
+  .pastweek-act { justify-content: flex-start; }
+}
+
+/* Staff: dated notes about a student (profile page, teacher's sheet page) */
+.notes-form-grid { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 0 16px; align-items: start; }
+.notes-form .field textarea { min-height: 76px; resize: vertical; }
+.notes-list { list-style: none; margin: 18px 0 0; padding: 0; border-top: 1px solid var(--line); }
+.notes-list li { display: grid; grid-template-columns: 110px minmax(0, 1fr) auto; gap: 4px 16px; padding: 12px 0; border-bottom: 1px solid var(--line); align-items: start; }
+.notes-date { font-weight: 700; color: var(--navy-deep); }
+.notes-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.notes-meta { margin: 4px 0 0; }
+.notes-del .msg { margin: 4px 0 0; font-size: 13px; }
+@media (max-width: 640px) {
+  .notes-form-grid { grid-template-columns: 1fr; }
+  .notes-list li { grid-template-columns: 1fr auto; }
+  .notes-date { grid-column: 1 / -1; }
+}
+.pastweek-more summary { margin-top: 12px; font-weight: 700; color: var(--navy); cursor: pointer; }
+.pastweek-more .pastweek-list { border-top: 0; margin-top: 4px; }

@@ -1,7 +1,7 @@
 import "server-only";
 import { cols, type Entry, type Student } from "./db";
 import { env } from "./env";
-import { addDays, clockIn, isClassDay, monthMinutes, sheetRows, todayIn, toMinutes, type TimeRules } from "./sheet";
+import { WEEKDAY_NAMES, addDays, clockIn, isClassDay, monthMinutes, sheetRows, todayIn, toMinutes, weekday, type SheetRow, type TimeRules } from "./sheet";
 import { entriesHash } from "./hash";
 import { signatureImages } from "./signatures";
 import type { Filter } from "mongodb";
@@ -65,10 +65,18 @@ export async function loadDay(date: string, scope: Filter<Student>, course?: str
 }
 
 /**
- * Past class days the student can still fill in themselves: from `from` (the start of the editing
- * window) to yesterday, nothing recorded, not a holiday, in a month that isn't approved.
+ * A past day the student can still complete themselves: nothing recorded, or a start time with no
+ * end time that staff haven't signed.
  */
-export async function missedDays(student: Student, from: string) {
+const needsFilling = (e: Pick<Entry, "status" | "startTime" | "endTime" | "staffSignature"> | undefined) =>
+  !e || (e.status === "PRESENT" && !!e.startTime && !e.endTime && !e.staffSignature);
+
+/**
+ * Past class days the student can still fill in themselves: from `from` (the start of the course
+ * unless given) to yesterday, nothing recorded (or started but not ended), not a holiday, in a
+ * month that isn't approved.
+ */
+export async function missedDays(student: Student, from: string = student.startDate) {
   const yesterday = addDays(today(), -1);
   const start = from > student.startDate ? from : student.startDate;
   if (start > yesterday) return [];
@@ -77,14 +85,60 @@ export async function missedDays(student: Student, from: string) {
   if (!days.length) return [];
   const { entries, approvals } = await cols();
   const [rows, holidays, apps] = await Promise.all([
-    entries.find({ studentId: student._id, date: { $in: days } }, { projection: { date: 1 } }).toArray(),
+    entries.find({ studentId: student._id, date: { $in: days } }, { projection: { date: 1, status: 1, startTime: 1, endTime: 1, staffSignature: 1 } }).toArray(),
     holidaysBetween(start, yesterday),
     approvals.find({ studentId: student._id, month: { $in: [...new Set(days.map((d) => d.slice(0, 7)))] } }, { projection: { month: 1 } }).toArray(),
   ]);
-  const recorded = new Set(rows.map((e) => e.date));
+  const byDate = new Map(rows.map((e) => [e.date, e]));
   const approved = new Set(apps.map((a) => a.month));
-  return days.filter((d) => !recorded.has(d) && !holidays.has(d) && !approved.has(d.slice(0, 7)));
+  return days.filter((d) => needsFilling(byDate.get(d)) && !holidays.has(d) && !approved.has(d.slice(0, 7)));
 }
+
+/** What a past day still needs from the student, or null if nothing (or nothing they can do). */
+export type DayTodo = "fill" | "finish" | "sign";
+const todoFor = (e: Entry | undefined): DayTodo | null => {
+  if (!e) return "fill";
+  if (e.status !== "PRESENT" || e.staffSignature) return null; // staff decided or validated it
+  if (!e.startTime) return null; // a row staff started; the student can't fill it
+  if (!e.endTime) return "finish";
+  return e.studentSignature ? null : "sign";
+};
+
+/**
+ * Every past class day of the student's course (start of the course to yesterday, across months)
+ * that still needs something from them: filling in, an end time, or their signature. Holidays and
+ * days in approved months are left out (those are closed). Newest first. History is left out, as
+ * on the student's sheet.
+ */
+export async function daysToFill(student: Student) {
+  const yesterday = addDays(today(), -1);
+  const end = student.endDate < yesterday ? student.endDate : yesterday;
+  if (student.startDate > end) return [];
+  const days: string[] = [];
+  for (let d = end; d >= student.startDate; d = addDays(d, -1)) if (isClassDay(student, d)) days.push(d);
+  if (!days.length) return [];
+  const { entries, approvals } = await cols();
+  const [list, holidays, apps] = await Promise.all([
+    entries.find({ studentId: student._id, date: { $gte: student.startDate, $lte: end } }).toArray(),
+    holidaysBetween(student.startDate, end),
+    approvals.find({ studentId: student._id }, { projection: { month: 1 } }).toArray(),
+  ]);
+  const byDate = new Map(list.map((e) => [e.date, e]));
+  const approved = new Set(apps.map((a) => a.month));
+  const out: { row: SheetRow; todo: DayTodo }[] = [];
+  for (const date of days) {
+    if (holidays.has(date) || approved.has(date.slice(0, 7))) continue;
+    const e = byDate.get(date);
+    const todo = todoFor(e);
+    if (!todo) continue;
+    out.push({
+      row: { date, weekdayName: WEEKDAY_NAMES[weekday(date)], holiday: null, entry: e ? { ...e, history: [] } : null, isToday: false, isFuture: false },
+      todo,
+    });
+  }
+  return out;
+}
+export type DayToFill = Awaited<ReturnType<typeof daysToFill>>[number];
 
 export const courseNames = async (scope: Filter<Student> = {}) =>
   ((await (await cols()).students.distinct("courseName", { $and: [scope, { active: true }] })) as string[]).filter(Boolean).sort();

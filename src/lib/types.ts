@@ -159,3 +159,19 @@ export type MonthApproval = {
 };
 
 export type AuditLog = { _id: string; at: Date; actor: string; action: string; target: string; meta: Record<string, unknown> };
+
+/**
+ * A dated note about a student, written by an admin or a teacher (e.g. "Called about absences,
+ * back Monday"). Staff-only: never shown to the student or printed on the sheet.
+ */
+export type StudentNote = {
+  _id: string;
+  studentId: string;
+  /** The day the note is about (YYYY-MM-DD). Defaults to the day it was written. */
+  date: string;
+  text: string;
+  byId: string;
+  byName: string;
+  byRole: Role;
+  createdAt: Date;
+};

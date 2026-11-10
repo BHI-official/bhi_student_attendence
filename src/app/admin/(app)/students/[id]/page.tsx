@@ -7,12 +7,14 @@ import { courseNames, thisMonth, today } from "@/lib/data";
 import { entriesHash } from "@/lib/hash";
 import { thresholds } from "@/lib/policy";
 import { signatureImages } from "@/lib/signatures";
+import { loadStudentNotes } from "@/lib/notes";
 import {
   LEVEL_WORDS, WEEKDAY_NAMES, attendanceSummary, enrollmentState, hoursText, monthTitle, shiftMonth, usDate, type AttendanceSummary,
 } from "@/lib/sheet";
 import { resetPinAction, saveStudentAction, saveStudentProfileAction, setStudentActiveAction, setStudentSignatureAction } from "@/actions/admin";
 import { ActionForm, Submit } from "@/components/forms";
 import { SignatureOnFile } from "@/components/SignatureCapture";
+import { StudentNotes } from "@/components/StudentNotes";
 import { PinForm, ProfileForm, StudentForm } from "../StudentForms";
 
 export const dynamic = "force-dynamic";
@@ -35,11 +37,12 @@ export default async function StudentProfilePage({ params }: { params: Promise<{
   if (!s || !canSee(staff, s)) notFound();
   const now = today();
   const admin = staff.role === "ADMIN";
-  const [rows, hols, apps, sigs] = await Promise.all([
+  const [rows, hols, apps, sigs, notes] = await Promise.all([
     entries.find({ studentId: id }).toArray(),
     holidays.find({ _id: { $gte: s.startDate, $lte: s.endDate } }, { projection: { _id: 1 } }).toArray(),
     approvals.find({ studentId: id }).toArray(),
     signatureImages([s.signatureId]),
+    loadStudentNotes(id),
   ]);
   const holidaySet = new Set(hols.map((h) => h._id));
   const t = thresholds();
@@ -141,6 +144,8 @@ export default async function StudentProfilePage({ params }: { params: Promise<{
           </ul>
         </details>
       )}
+
+      <StudentNotes studentId={s._id} studentName={s.name} notes={notes} staff={staff} today={now} />
 
       <h2>Contact and social information</h2>
       <section className="panel">
