@@ -8,6 +8,8 @@ export function entriesHash(entries: Entry[]) {
     e.date, e.status, e.startTime ?? "", e.endTime ?? "", e.minutes ?? "", !!e.studentSignature, !!e.staffSignature, e.note ?? "",
     // Handwritten times only when there are some, so approvals of older rows stay current.
     ...(e.startInkId || e.endInkId ? [e.startInkId ?? "", e.endInkId ?? ""] : []),
+    ...(e.lunchStartInkId || e.lunchEndInkId ? [e.lunchStartInkId ?? "", e.lunchEndInkId ?? ""] : []),
+    ...(e.studentSignature ? [e.studentSignature.id] : []), ...(e.staffSignature ? [e.staffSignature.id] : []),
   ]);
   return createHash("sha256").update(JSON.stringify(rows)).digest("hex");
 }

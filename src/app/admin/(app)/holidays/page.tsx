@@ -1,8 +1,6 @@
 import { cols } from "@/lib/db";
 import { requireAdmin } from "@/lib/auth";
 import { courseNames, today } from "@/lib/data";
-import { studentScope } from "@/lib/access";
-import { editWindowDays, firstOpenDate } from "@/lib/policy";
 import { usDate, weekday, WEEKDAY_NAMES } from "@/lib/sheet";
 import { addHolidayAction, removeHolidayAction } from "@/actions/admin";
 import { markCourseDayAction } from "@/actions/staff";
@@ -12,14 +10,14 @@ export const dynamic = "force-dynamic";
 export const metadata = { title: "Holidays and days off" };
 
 export default async function Holidays() {
-  const staff = await requireAdmin();
+  await requireAdmin();
   const from = `${today().slice(0, 4)}-01-01`;
   const { holidays, entries, students } = await cols();
   const list = await holidays.find({ _id: { $gte: from } }).sort({ _id: 1 }).toArray();
-  const admin = staff.role === "ADMIN";
-  const myCourses = admin ? await courseNames() : (await courseNames(studentScope(staff)));
+  const admin = true;
+  const myCourses = await courseNames();
   // Class days off already marked (rows marked Holiday / Excused by the class tool), from the start of the year.
-  const ids = (await students.find({ ...studentScope(staff), active: true }, { projection: { _id: 1, courseName: 1 } }).toArray());
+  const ids = (await students.find({ active: true }, { projection: { _id: 1, courseName: 1 } }).toArray());
   const courseOf = new Map(ids.map((s) => [s._id, s.courseName]));
   const marked = await entries.find(
     { studentId: { $in: [...courseOf.keys()] }, date: { $gte: from }, status: { $in: ["HOLIDAY", "EXCUSED"] }, "history.reason": "class day off" },
@@ -64,7 +62,6 @@ export default async function Holidays() {
       <h2>A day off for one class</h2>
       <p className="small muted">
         Marks the day on the sheet of every student in the class who has class that day, with your note. Days a student has already started are left as they are.
-        {!admin && ` You can mark days from ${usDate(firstOpenDate())} on (rows older than ${editWindowDays()} days are locked).`}
       </p>
       {myCourses.length ? (
         <ActionForm action={markCourseDayAction} className="panel">

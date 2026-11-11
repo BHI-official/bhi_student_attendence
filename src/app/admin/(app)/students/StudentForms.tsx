@@ -6,15 +6,15 @@ import { ActionForm, Field, Msg, Submit } from "@/components/forms";
 
 type Act = (prev: ActionState, fd: FormData) => Promise<ActionState>;
 export type StudentValues = { name: string; courseName: string; courseCode: string; courseDuration: string; caseManager: string; instructor: string; startDate: string; endDate: string; classDays: number[] };
-const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri"];
 
-export function StudentForm({ action, values, isNew, courses }: { action: Act; values?: StudentValues; isNew: boolean; courses: string[] }) {
+export function StudentForm({ action, values, isNew, courses, teachers = [] }: { action: Act; values?: StudentValues; isNew: boolean; courses: string[]; teachers?: { id: string; name: string }[] }) {
   const v = values;
   return (
     <ActionForm action={action}>
       <div className="grid2">
         <Field name="name" label="Student name" defaultValue={v?.name} required />
-        <Field name="courseName" label="Course name" defaultValue={v?.courseName}>
+        <Field name="courseName" label="Program / class" defaultValue={v?.courseName}>
           <><input id="f-courseName" name="courseName" list="courses" defaultValue={v?.courseName} /><datalist id="courses">{courses.map((c) => <option key={c} value={c} />)}</datalist></>
         </Field>
         <Field name="courseCode" label="Course code" defaultValue={v?.courseCode} />
@@ -25,11 +25,19 @@ export function StudentForm({ action, values, isNew, courses }: { action: Act; v
         <Field name="endDate" label="End date" type="date" defaultValue={v?.endDate} required />
       </div>
       <fieldset className="field" style={{ border: 0, padding: 0 }}>
-        <legend style={{ fontWeight: 700, fontSize: 15, marginBottom: 6 }}>Class days</legend>
+        <legend style={{ fontWeight: 700, fontSize: 15, marginBottom: 6 }}>Class days (Monday to Friday)</legend>
         <div className="row">{DAYS.map((d, i) => (
           <label key={d}><input type="checkbox" className="chk" name="classDays" value={i + 1} defaultChecked={(v?.classDays ?? [1, 2, 3, 4, 5]).includes(i + 1)} /> {d}</label>
         ))}</div>
       </fieldset>
+      {isNew && (
+        <Field name="teacherId" label="Teacher (whose roster the student is on)">
+          <select id="f-teacherId" name="teacherId" defaultValue="">
+            <option value="">Assign later</option>
+            {teachers.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+        </Field>
+      )}
       {isNew && <Field name="pin" label="PIN (optional: leave empty for a random 4-digit PIN)" inputMode="numeric" />}
       <Submit>{isNew ? "Add student" : "Save changes"}</Submit>
     </ActionForm>
@@ -86,6 +94,21 @@ export function PinForm({ action, name }: { action: Act; name: string }) {
     <ActionForm action={action} confirm={`Give ${name} a new PIN? The old one stops working.`}>
       <Field name="pin" label="New PIN (optional: leave empty for a random one)" inputMode="numeric" />
       <Submit>Give a new PIN</Submit>
+    </ActionForm>
+  );
+}
+
+/** Pick a student's teacher. Changing it moves the student to the new roster; records stay as they are. */
+export function TeacherSelect({ action, teachers, current, compact }: { action: Act; teachers: { id: string; name: string }[]; current: string | null; compact?: boolean }) {
+  return (
+    <ActionForm action={action} className={compact ? "assign compact" : "assign"}>
+      <div className="row" style={{ alignItems: "center", gap: 8 }}>
+        <select name="teacherId" defaultValue={current ?? ""} aria-label="Teacher">
+          <option value="">Not assigned</option>
+          {teachers.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+        </select>
+        <Submit className="btn ghost sm">{compact ? "Save" : "Save teacher"}</Submit>
+      </div>
     </ActionForm>
   );
 }

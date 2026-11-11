@@ -1,19 +1,13 @@
 import "server-only";
+import type { Filter } from "mongodb";
 import { cols, type Entry, type Student } from "./db";
 import { env } from "./env";
-import { WEEKDAY_NAMES, addDays, clockIn, isClassDay, monthMinutes, sheetRows, todayIn, toMinutes, weekday, type SheetRow, type TimeRules } from "./sheet";
+import { clockIn, monthMinutes, sheetRows, todayIn, toMinutes } from "./sheet";
 import { entriesHash } from "./hash";
 import { signatureImages } from "./signatures";
-import type { Filter } from "mongodb";
 
 export const today = () => todayIn(env().APP_TIMEZONE);
 export const thisMonth = () => today().slice(0, 7);
-
-/** Limits for times students type, from settings. */
-export const timeRules = (): TimeRules => {
-  const e = env();
-  return { windowMinutes: e.TIME_ENTRY_WINDOW_MINUTES, minMinutes: e.MIN_CLASS_MINUTES, maxMinutes: e.MAX_CLASS_MINUTES };
-};
 
 /** The school's clock right now (or at an instant), in minutes since midnight, seconds dropped. */
 export const schoolMinutes = (at = new Date()) => toMinutes(clockIn(env().APP_TIMEZONE, at, "end"));
@@ -24,7 +18,7 @@ export async function holidaysBetween(from: string, to: string) {
   return new Map(list.map((h) => [h._id, h.note ? `${h.name} – ${h.note}` : h.name]));
 }
 
-/** Everything one month's sheet shows for one student. */
+/** Everything one month's printed sheet shows for one student (used by the PDF and Word reports). */
 export async function loadSheet(studentId: string, month: string) {
   const { students, entries, approvals } = await cols();
   const student = await students.findOne({ _id: studentId });
@@ -36,7 +30,7 @@ export async function loadSheet(studentId: string, month: string) {
   ]);
   const rows = sheetRows(student, month, list, holidays, today());
   const images = await signatureImages([
-    ...list.flatMap((e) => [e.studentSignature?.id, e.staffSignature?.id, e.startInkId, e.endInkId, ...(e.comments ?? []).map((c) => c.inkId)]),
+    ...list.flatMap((e) => [e.studentSignature?.id, e.staffSignature?.id, e.startInkId, e.endInkId, e.lunchStartInkId, e.lunchEndInkId, ...(e.comments ?? []).map((c) => c.inkId)]),
     approval?.signatureId, approval?.commentsInkId,
   ]);
   return {
@@ -51,112 +45,16 @@ export async function loadSheet(studentId: string, month: string) {
 }
 export type SheetData = NonNullable<Awaited<ReturnType<typeof loadSheet>>>;
 
-/** Students who have class today, with today's row, for the staff board. */
-export async function loadDay(date: string, scope: Filter<Student>, course?: string) {
-  const { students, entries } = await cols();
-  const list = (await students
-    .find({ $and: [scope, { active: true, startDate: { $lte: date }, endDate: { $gte: date }, ...(course ? { courseName: course } : {}) }] })
-    .sort({ nameLower: 1 })
-    .toArray()).filter((s) => isClassDay(s, date));
-  const rows = await entries.find({ date, studentId: { $in: list.map((s) => s._id) } }).toArray();
-  const byStudent = new Map(rows.map((e) => [e.studentId, e]));
-  const holiday = (await holidaysBetween(date, date)).get(date) ?? null;
-  return { date, holiday, rows: list.map((s) => ({ student: s, entry: byStudent.get(s._id) ?? null })) };
-}
-
-/**
- * A past day the student can still complete themselves: nothing recorded, or a start time with no
- * end time that staff haven't signed.
- */
-const needsFilling = (e: Pick<Entry, "status" | "startTime" | "endTime" | "staffSignature"> | undefined) =>
-  !e || (e.status === "PRESENT" && !!e.startTime && !e.endTime && !e.staffSignature);
-
-/**
- * Past class days the student can still fill in themselves: from `from` (the start of the course
- * unless given) to yesterday, nothing recorded (or started but not ended), not a holiday, in a
- * month that isn't approved.
- */
-export async function missedDays(student: Student, from: string = student.startDate) {
-  const yesterday = addDays(today(), -1);
-  const start = from > student.startDate ? from : student.startDate;
-  if (start > yesterday) return [];
-  const days: string[] = [];
-  for (let d = start; d <= yesterday; d = addDays(d, 1)) if (isClassDay(student, d)) days.push(d);
-  if (!days.length) return [];
-  const { entries, approvals } = await cols();
-  const [rows, holidays, apps] = await Promise.all([
-    entries.find({ studentId: student._id, date: { $in: days } }, { projection: { date: 1, status: 1, startTime: 1, endTime: 1, staffSignature: 1 } }).toArray(),
-    holidaysBetween(start, yesterday),
-    approvals.find({ studentId: student._id, month: { $in: [...new Set(days.map((d) => d.slice(0, 7)))] } }, { projection: { month: 1 } }).toArray(),
-  ]);
-  const byDate = new Map(rows.map((e) => [e.date, e]));
-  const approved = new Set(apps.map((a) => a.month));
-  return days.filter((d) => needsFilling(byDate.get(d)) && !holidays.has(d) && !approved.has(d.slice(0, 7)));
-}
-
-/** What a past day still needs from the student, or null if nothing (or nothing they can do). */
-export type DayTodo = "fill" | "finish" | "sign";
-const todoFor = (e: Entry | undefined): DayTodo | null => {
-  if (!e) return "fill";
-  if (e.status !== "PRESENT" || e.staffSignature) return null; // staff decided or validated it
-  if (!e.startTime) return null; // a row staff started; the student can't fill it
-  if (!e.endTime) return "finish";
-  return e.studentSignature ? null : "sign";
-};
-
-/**
- * Every past class day of the student's course (start of the course to yesterday, across months)
- * that still needs something from them: filling in, an end time, or their signature. Holidays and
- * days in approved months are left out (those are closed). Newest first. History is left out, as
- * on the student's sheet.
- */
-export async function daysToFill(student: Student) {
-  const yesterday = addDays(today(), -1);
-  const end = student.endDate < yesterday ? student.endDate : yesterday;
-  if (student.startDate > end) return [];
-  const days: string[] = [];
-  for (let d = end; d >= student.startDate; d = addDays(d, -1)) if (isClassDay(student, d)) days.push(d);
-  if (!days.length) return [];
-  const { entries, approvals } = await cols();
-  const [list, holidays, apps] = await Promise.all([
-    entries.find({ studentId: student._id, date: { $gte: student.startDate, $lte: end } }).toArray(),
-    holidaysBetween(student.startDate, end),
-    approvals.find({ studentId: student._id }, { projection: { month: 1 } }).toArray(),
-  ]);
-  const byDate = new Map(list.map((e) => [e.date, e]));
-  const approved = new Set(apps.map((a) => a.month));
-  const out: { row: SheetRow; todo: DayTodo }[] = [];
-  for (const date of days) {
-    if (holidays.has(date) || approved.has(date.slice(0, 7))) continue;
-    const e = byDate.get(date);
-    const todo = todoFor(e);
-    if (!todo) continue;
-    out.push({
-      row: { date, weekdayName: WEEKDAY_NAMES[weekday(date)], holiday: null, entry: e ? { ...e, history: [] } : null, isToday: false, isFuture: false },
-      todo,
-    });
-  }
-  return out;
-}
-export type DayToFill = Awaited<ReturnType<typeof daysToFill>>[number];
-
 export const courseNames = async (scope: Filter<Student> = {}) =>
   ((await (await cols()).students.distinct("courseName", { $and: [scope, { active: true }] })) as string[]).filter(Boolean).sort();
 
-/** Who may see a student's sheet: staff, or that student. */
-export const sameStudent = (s: Student | null, id: string) => !!s && s._id === id;
-export type { Entry };
+/** Active teachers, for assignment menus and filters. */
+export const teacherList = async () =>
+  (await (await cols()).staff.find({ role: "TEACHER", active: true }, { projection: { name: 1 } }).sort({ name: 1 }).toArray()).map((t) => ({ id: t._id, name: t.name }));
 
-/** Only the fields the sheet prints. Never send the whole student (it holds the PIN hash) to the browser. */
+/** Only the fields a page may show. Never send the whole student (it holds the PIN hash) to the browser. */
 export const sheetHeader = (s: Student) => ({
   _id: s._id, name: s.name, courseName: s.courseName, courseCode: s.courseCode, courseDuration: s.courseDuration,
   caseManager: s.caseManager, instructor: s.instructor, startDate: s.startDate, endDate: s.endDate,
 });
-
-/**
- * Rows as sent to the browser. A student's own sheet must not show staff-only details, so comments
- * are filtered: a student sees their own comments and staff comments, which is everything on their
- * row (nothing on a row belongs to another student). History stays out of the student view.
- */
-export const rowsForStudent = (rows: SheetData["rows"]) =>
-  rows.map((r) => (r.entry ? { ...r, entry: { ...r.entry, history: [] } } : r));
+export type { Entry };

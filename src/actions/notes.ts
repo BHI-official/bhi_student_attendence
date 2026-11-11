@@ -19,7 +19,7 @@ const refresh = () => { revalidatePath("/admin", "layout"); revalidatePath("/tea
 export async function addStudentNoteAction(studentId: string, _: ActionState, fd: FormData): Promise<ActionState> {
   const staff = await requireStaff();
   if (!/^[0-9a-f-]{36}$/.test(studentId)) return { error: "Student not found." };
-  const student = await (await cols()).students.findOne({ _id: studentId }, { projection: { courseName: 1 } });
+  const student = await (await cols()).students.findOne({ _id: studentId }, { projection: { teacherId: 1 } });
   if (!student || !canSee(staff, student)) return { error: "Student not found." };
   if (!(await rateLimit(`note:${staff._id}`, 60, 600))) return { error: "Too many notes in a short time. Wait a few minutes." };
 
@@ -47,7 +47,7 @@ export async function deleteStudentNoteAction(noteId: string, _: ActionState, __
   const { notes, students } = await cols();
   const note = await notes.findOne({ _id: noteId });
   if (!note) return { ok: true, message: "Note deleted." };
-  const student = await students.findOne({ _id: note.studentId }, { projection: { courseName: 1 } });
+  const student = await students.findOne({ _id: note.studentId }, { projection: { teacherId: 1 } });
   if (!student || !canSee(staff, student)) return { error: "Note not found." };
   if (staff.role !== "ADMIN" && note.byId !== staff._id) return { error: "You can only delete your own notes. Ask an admin." };
   await notes.deleteOne({ _id: noteId });

@@ -18,8 +18,8 @@ export default async function StudentHome() {
   return (
     <main className="wrap">
       <p className="welcome">Welcome to Bright Horizon Institute</p>
-      <h1>Who are you?</h1>
-      <p className="lead">Find your name to open your attendance sheet.</p>
+      <h1>Find your name</h1>
+      <p className="lead">Then enter your PIN to sign your attendance.</p>
       <StudentPicker students={list.map((s) => ({ id: s._id, name: s.name, course: s.courseName }))} />
     </main>
   );

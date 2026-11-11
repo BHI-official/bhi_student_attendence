@@ -8,11 +8,11 @@ type Act = (prev: ActionState, fd: FormData) => Promise<ActionState>;
 const Ctx = createContext<ActionState>({});
 
 /** A form wired to a server action, showing its result message. */
-export function ActionForm({ action, children, confirm, className, hideMessage }: { action: Act; children: ReactNode; confirm?: string; className?: string; hideMessage?: boolean }) {
+export function ActionForm({ action, children, confirm, className, hideMessage, id }: { action: Act; children: ReactNode; confirm?: string; className?: string; hideMessage?: boolean; id?: string }) {
   const [state, run] = useActionState(action, {});
   return (
     <Ctx.Provider value={state}>
-      <form action={run} className={className} onSubmit={(e) => { if (confirm && !window.confirm(confirm)) e.preventDefault(); }}>
+      <form id={id} action={run} className={className} onSubmit={(e) => { if (confirm && !window.confirm(confirm)) e.preventDefault(); }}>
         {children}
         {!hideMessage && <Msg state={state} />}
       </form>

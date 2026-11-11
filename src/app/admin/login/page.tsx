@@ -9,5 +9,5 @@ export const metadata = { title: "Admin sign-in" };
 export default async function AdminLogin() {
   const staff = await currentStaff();
   if (staff) redirect(PORTAL[staff.role].home);
-  return <StaffLogin title="Admin sign-in" lead="For the office: students, PINs, holidays, accounts and corrections." action={adminLoginAction} other={{ href: "/teacher/login", text: "Teacher? Sign in here" }} />;
+  return <StaffLogin title="Admin sign-in" lead="For the office: all attendance, students and teacher assignments, corrections and excuses." action={adminLoginAction} who="admin" />;
 }

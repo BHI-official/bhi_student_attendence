@@ -9,7 +9,7 @@ import { LOGO_PNG_BASE64 } from "./brand-logo";
 
 const LOGO_PNG = Buffer.from(LOGO_PNG_BASE64, "base64");
 import { loadSheet, thisMonth, type SheetData } from "./data";
-import { LEVEL_WORDS, hoursText, monthTitle, shiftMonth, time12, usDate, type AttendanceSummary } from "./sheet";
+import { LEVEL_WORDS, monthTitle, shiftMonth, time12, usDate, type AttendanceSummary } from "./sheet";
 import type { RowComment } from "./types";
 
 /** One month, or every month of the course up to now. */
@@ -40,11 +40,12 @@ function rowCells(r: SheetData["rows"][number]) {
   const off = r.holiday ?? (e && e.status !== "PRESENT" ? STATUS_WORD[e.status] + (e.note ? ` (${e.note})` : "") : null);
   return {
         day: r.weekdayName.toUpperCase(), date: usDate(r.date), off, holiday: holidayRow,
-    start: off ? "" : time12(e?.startTime ?? null), end: off ? "" : time12(e?.endTime ?? null), hours: off ? "" : hoursText(e?.minutes),
+    start: off ? "" : time12(e?.startTime ?? null), end: off ? "" : time12(e?.endTime ?? null),
     // Holidays carry no signatures, even if one was added before this rule.
     studentSig: holidayRow ? null : e?.studentSignature?.id ?? null, staffSig: holidayRow ? null : e?.staffSignature?.id ?? null,
     // The student's handwritten time, printed in place of the typed one when there is one.
-    startInk: off || !e?.startTime ? null : e.startInkId ?? null, endInk: off || !e?.endTime ? null : e.endInkId ?? null,
+    startInk: off ? null : e?.startInkId ?? null, endInk: off ? null : e?.endInkId ?? null,
+    lunchStartInk: off ? null : e?.lunchStartInkId ?? null, lunchEndInk: off ? null : e?.lunchEndInkId ?? null,
   };
 }
 
@@ -157,7 +158,7 @@ function pdfFooter(c: PdfCtx, page: PDFPage, L: number, R: number) {
   page.drawLine({ start: { x: L, y: y - 1.2 }, end: { x: L + lw, y: y - 1.2 }, thickness: 0.4, color: navy });
   const contact = `${SCHOOL.name}  ·  ${SCHOOL.phone}  ·  ${SCHOOL.email}`;
   page.drawText(contact, { x: R - c.font.widthOfTextAtSize(contact, 7.5), y, size: 7.5, font: c.font, color: grey });
-  page.drawText(`Generated ${new Date().toLocaleString("en-US")}. Times are typed by the student and checked against the school's clock; signatures are handwritten.`, { x: L, y: y - 11, size: 6.5, font: c.font, color: grey });
+  page.drawText(`Generated ${new Date().toLocaleString("en-US")}. Times and signatures are handwritten by the student; each day is checked and signed by the teacher.`, { x: L, y: y - 11, size: 6.5, font: c.font, color: grey });
 }
 
 async function pdfMonth(c: PdfCtx, sheet: SheetData) {
@@ -186,9 +187,9 @@ async function pdfMonth(c: PdfCtx, sheet: SheetData) {
   text(page, `MONTH: ${monthTitle(sheet.month).toUpperCase()}`, L, y, 10, bold);
   y -= 6;
 
-  const cols = [{ t: "", w: 62 }, { t: "DATE", w: 62 }, { t: "START TIME", w: 62 }, { t: "END TIME", w: 62 }, { t: "HOURS", w: 44 }, { t: "STUDENT SIGNATURE", w: 120 }, { t: "STAFF SIGNATURE", w: 120 }];
+  const cols = [{ t: "", w: 50 }, { t: "DATE", w: 54 }, { t: "START", w: 58 }, { t: "LUNCH START", w: 60 }, { t: "LUNCH END", w: 58 }, { t: "END", w: 58 }, { t: "STUDENT SIGNATURE", w: 97 }, { t: "TEACHER SIGNATURE", w: 97 }];
   // Column headings as on the screen: bold on a light band, centred.
-  const headH = 20, headSize = 8.5;
+  const headH = 20, headSize = 7;
   y -= headH;
   let x = L;
   for (const col of cols) {
@@ -197,7 +198,7 @@ async function pdfMonth(c: PdfCtx, sheet: SheetData) {
     x += col.w;
   }
   // Rows share what's left between the table header and the approval block, so a long month still fits one page.
-  const approvalBlock = 18 + 22 + 15 + 30 + 18 + 26;
+  const approvalBlock = 22 + 15 + 30 + 18 + 26;
   const rowH = Math.min(24, Math.max(11, Math.floor((y - FOOTER_TOP - approvalBlock) / Math.max(1, sheet.rows.length))));
   const fs = rowH < 14 ? 8 : 9;
   for (const r of sheet.rows) {
@@ -207,7 +208,7 @@ async function pdfMonth(c: PdfCtx, sheet: SheetData) {
     const xs = cols.map((col) => { const at = x; x += col.w; return at; });
         // Holiday: one open cell from START TIME to the end of the row (no column lines).
     // Absent / Excused: one cell over the three time columns; signatures stay.
-    const spanTo = v.holiday ? 6 : v.off ? 4 : 1;
+    const spanTo = v.holiday ? 7 : v.off ? 5 : 1;
     cols.forEach((col, i) => { if (i < 2 || i > spanTo) box(xs[i], y, col.w, rowH); });
     if (spanTo > 1) box(xs[2], y, cols.slice(2, spanTo + 1).reduce((t, col) => t + col.w, 0), rowH);
     const mid = y + rowH / 2 - 3;
@@ -221,22 +222,17 @@ async function pdfMonth(c: PdfCtx, sheet: SheetData) {
       while (t.length > 3 && bold.widthOfTextAtSize(t, offSize) > spanW - 8) t = t.slice(0, -2) + "…";
       text(page, t, xs[2] + (spanW - bold.widthOfTextAtSize(t, offSize)) / 2, y + rowH / 2 - offSize * 0.35, offSize, bold, ink);
     } else {
-      for (const [i, value, inkId] of [[2, v.start, v.startInk], [3, v.end, v.endInk]] as const) {
+      for (const [i, value, inkId] of [[2, v.start, v.startInk], [3, "", v.lunchStartInk], [4, "", v.lunchEndInk], [5, v.end, v.endInk]] as const) {
         const img = await image(inkId, sheet.images);
         if (img) { const d = fit(img.width, img.height, cols[i].w - 6, rowH - 3); page.drawImage(img, { x: xs[i] + 3, y: y + (rowH - d.h) / 2, width: d.w, height: d.h }); }
         else text(page, value, xs[i] + 4, mid, fs, font, ink);
       }
-      text(page, v.hours, xs[4] + 4, mid, fs, font, ink);
     }
-    for (const [i, id] of [[5, v.studentSig], [6, v.staffSig]] as const) {
+    for (const [i, id] of [[6, v.studentSig], [7, v.staffSig]] as const) {
       const img = await image(id, sheet.images);
       if (img) { const d = fit(img.width, img.height, cols[i].w - 8, rowH - 3); page.drawImage(img, { x: xs[i] + (cols[i].w - d.w) / 2, y: y + (rowH - d.h) / 2, width: d.w, height: d.h }); }
     }
   }
-  y -= 18;
-  box(L, y, 292, 18); text(page, "TOTAL HOURS", L + 200, y + 6, 8, bold);
-  box(L + 292, y, 240, 18); text(page, hoursText(sheet.totalMinutes) || "0", L + 298, y + 5.5, 10, bold, ink);
-
   y -= 22;
   text(page, "Approved by:", L, y, 9, bold);
   const a = sheet.approval;
@@ -446,24 +442,22 @@ export async function buildDocx(report: Report): Promise<Buffer> {
         .map((r) => new TableRow({ children: r.map((v, i) => cell(String(v ?? ""), { width: [1900, 2900, 1800, 3000][i], bold: i % 2 === 0 })) })),
     }));
     children.push(new Paragraph({ spacing: { before: 200, after: 100 }, children: [new TextRun({ text: `MONTH: ${monthTitle(sheet.month).toUpperCase()}`, bold: true })] }));
-    const widths = [1200, 1200, 1150, 1150, 800, 2050, 2050];
-    const header = new TableRow({ tableHeader: true, children: ["", "DATE", "START TIME", "END TIME", "HOURS", "STUDENT SIGNATURE", "STAFF SIGNATURE"].map((t, i) => cell(t, { width: widths[i], bold: true, size: 17, center: true, shade: true })) });
+    const widths = [900, 1100, 1100, 1150, 1100, 1100, 1575, 1575];
+    const header = new TableRow({ tableHeader: true, children: ["", "DATE", "START", "LUNCH START", "LUNCH END", "END", "STUDENT SIGNATURE", "TEACHER SIGNATURE"].map((t, i) => cell(t, { width: widths[i], bold: true, size: 17, center: true, shade: true })) });
     const rows = sheet.rows.map((r) => {
       const v = rowCells(r);
       const first = [cell(v.day, { width: widths[0], size: 14 }), cell(v.date, { width: widths[1] })];
             // Holiday: one cell to the end of the row (no column lines, no signature cells).
-      if (v.holiday) return new TableRow({ children: [...first, cell((v.off ?? "Holiday").toUpperCase(), { span: 5, ink: true, bold: true, center: true, size: 20, width: widths[2] + widths[3] + widths[4] + widths[5] + widths[6] })] });
+      const sum = (a: number, b: number) => widths.slice(a, b + 1).reduce((t, w) => t + w, 0);
+      if (v.holiday) return new TableRow({ children: [...first, cell((v.off ?? "Holiday").toUpperCase(), { span: 6, ink: true, bold: true, center: true, size: 20, width: sum(2, 7) })] });
+      const timeCell = (inkId: string | null, typed: string, w: number) =>
+        inkId && sheet.images[inkId] ? cell(sigRun(inkId, sheet.images, 60, 17), { width: w }) : cell(typed, { width: w, ink: true, size: 18 });
       const mid = v.off
-        ? [cell(v.off.toUpperCase(), { span: 3, ink: true, bold: true, center: true, size: 20, width: widths[2] + widths[3] + widths[4] })]
-        : [
-          v.startInk && sheet.images[v.startInk] ? cell(sigRun(v.startInk, sheet.images, 70, 17), { width: widths[2] }) : cell(v.start, { width: widths[2], ink: true, size: 18 }),
-          v.endInk && sheet.images[v.endInk] ? cell(sigRun(v.endInk, sheet.images, 70, 17), { width: widths[3] }) : cell(v.end, { width: widths[3], ink: true, size: 18 }),
-          cell(v.hours, { width: widths[4], ink: true, size: 18 }),
-        ];
-      return new TableRow({ children: [...first, ...mid, cell(sigRun(v.studentSig, sheet.images, 90, 17), { width: widths[5] }), cell(sigRun(v.staffSig, sheet.images, 90, 17), { width: widths[6] })] });
+        ? [cell(v.off.toUpperCase(), { span: 4, ink: true, bold: true, center: true, size: 20, width: sum(2, 5) })]
+        : [timeCell(v.startInk, v.start, widths[2]), timeCell(v.lunchStartInk, "", widths[3]), timeCell(v.lunchEndInk, "", widths[4]), timeCell(v.endInk, v.end, widths[5])];
+      return new TableRow({ children: [...first, ...mid, cell(sigRun(v.studentSig, sheet.images, 75, 17), { width: widths[6] }), cell(sigRun(v.staffSig, sheet.images, 75, 17), { width: widths[7] })] });
     });
-    const total = new TableRow({ children: [cell("TOTAL HOURS", { span: 4, bold: true, width: widths[0] + widths[1] + widths[2] + widths[3] }), cell(hoursText(sheet.totalMinutes) || "0", { bold: true, ink: true, width: widths[4] }), cell("", { span: 2, width: widths[5] + widths[6] })] });
-    children.push(new Table({ width: { size: 9600, type: WidthType.DXA }, columnWidths: widths, rows: [header, ...rows, total] }));
+    children.push(new Table({ width: { size: 9600, type: WidthType.DXA }, columnWidths: widths, rows: [header, ...rows] }));
     const a = sheet.approval;
     children.push(new Paragraph({ spacing: { before: 240 }, children: [new TextRun({ text: "Approved by:", bold: true })] }));
     children.push(new Paragraph({ children: [new TextRun({ text: `STAFF NAME/POSITION: ${a ? `${a.staffName}${a.position ? `/${a.position}` : ""}`.toUpperCase() : "______________________"}` })] }));
@@ -512,7 +506,7 @@ export async function buildMonthSummaryPdf(month: string, course: string, rows: 
   const colors = { good: rgb(0.12, 0.62, 0.33), attention: rgb(0.94, 0.55, 0), poor: rgb(0.85, 0.18, 0.13), none: rgb(0.67, 0.7, 0.75) };
   const cols = [
     { t: "Student", w: 170 }, { t: "Class", w: 150 }, { t: "Status", w: 66 }, { t: "Class days", w: 50 }, { t: "Present", w: 46 },
-    { t: "Absent", w: 46 }, { t: "Excused", w: 46 }, { t: "Hours", w: 46 }, { t: "Attendance", w: 92 }, { t: "Approved", w: 0 },
+    { t: "Absent", w: 46 }, { t: "Excused", w: 46 }, { t: "Attendance", w: 92 }, { t: "Signed off", w: 0 },
   ];
   cols[cols.length - 1].w = R - L - cols.slice(0, -1).reduce((t, x) => t + x.w, 0);
   const totals = { present: 0, absent: 0, excused: 0, minutes: 0 };
@@ -538,14 +532,14 @@ export async function buildMonthSummaryPdf(month: string, course: string, rows: 
     totals.present += sm.present; totals.absent += sm.absent + sm.missing; totals.excused += sm.excused; totals.minutes += sm.minutes;
     const vals = [
       r.name, r.course, r.status, String(sm.classDays - sm.holidays), String(sm.present),
-      String(sm.absent + sm.missing), String(sm.excused), hoursText(sm.minutes) || "0",
+      String(sm.absent + sm.missing), String(sm.excused),
       sm.rate === null ? "-" : `${sm.rate}%`, r.approved === "current" ? "Yes" : r.approved === "outdated" ? "Changed since" : "No",
     ];
     let x = L;
     vals.forEach((v, i) => {
       page.drawRectangle({ x, y, width: cols[i].w, height: 17, borderWidth: 0.4, borderColor: rgb(0.6, 0.63, 0.7) });
-      const dx = i === 8 ? 16 : 4;
-      if (i === 8) page.drawCircle({ x: x + 8, y: y + 8.5, size: 4, color: colors[sm.level] });
+      const dx = i === 7 ? 16 : 4;
+      if (i === 7) page.drawCircle({ x: x + 8, y: y + 8.5, size: 4, color: colors[sm.level] });
       page.drawText(clip(v, c.font, 8.5, cols[i].w - dx - 4), { x: x + dx, y: y + 5.5, size: 8.5, font: c.font, color: black });
       x += cols[i].w;
     });
@@ -553,7 +547,7 @@ export async function buildMonthSummaryPdf(month: string, course: string, rows: 
   if (!rows.length) { y -= 20; page!.drawText("Nobody in this class had class days this month.", { x: L, y, size: 10, font: c.font }); }
   y -= 26;
   if (y < FOOTER_TOP + 30) { newPage(); y -= 20; }
-  page!.drawText(pdfSafe(`${rows.length} students. Present ${totals.present} days, absent ${totals.absent} (including days not recorded), excused ${totals.excused}. ${hoursText(totals.minutes) || "0"} hours in total.`, c.font), { x: L, y, size: 9, font: c.font, color: black });
+  page!.drawText(pdfSafe(`${rows.length} students. Present ${totals.present} days, absent ${totals.absent} (including days not recorded), excused ${totals.excused}.`, c.font), { x: L, y, size: 9, font: c.font, color: black });
   y -= 13;
   page!.drawText(pdfSafe(`Colours: green ${LEVEL_WORDS.good.toLowerCase()}, orange ${LEVEL_WORDS.attention.toLowerCase()}, red ${LEVEL_WORDS.poor.toLowerCase()}. Holidays and excused days don't count against a student.`, c.font), { x: L, y, size: 8, font: c.font, color: rgb(0.35, 0.38, 0.45) });
   return c.doc.save();

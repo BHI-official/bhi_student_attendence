@@ -2,16 +2,17 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
+import { Binary } from "mongodb";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
-import { audit, cols, newId, rateLimit, type Entry, type EntryStatus, type RowComment } from "@/lib/db";
+import { audit, cols, newId, rateLimit, type Entry, type EntryStatus, type Excuse, type RowComment, type Staff } from "@/lib/db";
 import { PORTAL, endStaffSession, requireStaff, startStaffSession } from "@/lib/auth";
 import { holidaysBetween, thisMonth, today } from "@/lib/data";
-import { DATE_RE, MONTH_RE, TIME_RE, addDays, isClassDay, minutesBetween, time12, usDate } from "@/lib/sheet";
+import { DATE_RE, MONTH_RE, addDays, isClassDay, minutesBetween, monthTitle, parseTime, time12, usDate } from "@/lib/sheet";
 import { entriesHash } from "@/lib/hash";
 import { canSee } from "@/lib/access";
-import { checkNotePng, checkSignaturePng, saveSignature } from "@/lib/signatures";
-import { editWindowDays, isLocked, lockedFor } from "@/lib/policy";
+import { checkSignaturePng, saveSignature } from "@/lib/signatures";
+import { EXCUSE_MAX_BYTES, STATUS_LABEL, dayStatus, safeFileName, sniffExcuse, teacherLock } from "@/lib/week";
 import type { ActionState } from "@/lib/action";
 
 const refresh = () => { revalidatePath("/admin", "layout"); revalidatePath("/teacher", "layout"); revalidatePath("/student", "layout"); };
@@ -46,359 +47,360 @@ export async function teacherLogoutAction() {
   redirect(PORTAL.TEACHER.login);
 }
 
-/**
- * A row can be signed by staff once the day is decided: times complete, or absent / excused.
- * Holidays (on the holiday list, or a row marked Holiday) are never signed.
- */
-const NO_SIG = "Sign by hand, or put your signature on file (My account) to sign with one tap.";
-/** Teachers review a student's entries; only the student (and admins) write them. */
-const TEACHER_READ_ONLY = "Teachers can't change a student's entries. Ask an admin.";
-/** Who signs what: the teacher signs each row, an admin signs the month at the bottom. */
-const ROWS_ARE_TEACHERS = "Each row is signed by the teacher. Admins sign the “Approved by” section at the bottom of the month.";
-const APPROVAL_IS_ADMINS = "The “Approved by” section is signed by an admin. Teachers sign each row.";
-const isHolidayRow = (e: Entry | null, holiday: boolean) => holiday || e?.status === "HOLIDAY";
-const signable = (e: Entry | null, holiday: boolean) =>
-  !isHolidayRow(e, holiday) && !!e && (e.status !== "PRESENT" || (!!e.startTime && !!e.endTime));
+// ---------- The roster: approve, send back, present / absent, excuses ----------
 
-/** A present day with both times, the only kind of row a student signs. */
-const needsStudentSig = (e: Entry | null) => !!e && e.status === "PRESENT" && !!e.startTime && !!e.endTime && !e.studentSignature;
-
-/**
- * The teacher signs many rows at once (the "Staff signature" column), with one handwritten
- * signature or their signature on file. Only teachers sign rows; admins sign the month.
- *
- * A row is only ever signed once: rows already signed are left alone, so nobody's signature is
- * replaced here. Because teachers are the only ones who sign rows, they can sign an unsigned row
- * after the editing window too (signing doesn't change the student's entries). Holidays are skipped.
- */
-export async function signRowsAction(_: ActionState, fd: FormData): Promise<ActionState> {
-  const staff = await requireStaff();
-  if (staff.role !== "TEACHER") return { error: ROWS_ARE_TEACHERS };
-  const keys = z.array(z.string().regex(/^[0-9a-f-]{36}:\d{4}-\d{2}-\d{2}$/)).max(1000).safeParse(JSON.parse(String(fd.get("rows") ?? "[]")));
-  if (!keys.success || !keys.data.length) return { error: "Choose the rows to sign." };
-  // Signed by hand just now, or with the signature on file.
-  const rawHand = String(fd.get("signature") ?? "");
-  const hand = rawHand ? checkSignaturePng(rawHand) : null;
-  if (hand && "error" in hand) return { error: hand.error };
-  if (!hand && !staff.signatureId) return { error: NO_SIG };
-  const { entries, students } = await cols();
-  const dates = keys.data.map((k) => k.slice(37));
-  const holidays = await holidaysBetween(dates.reduce((a, b) => (a < b ? a : b)), dates.reduce((a, b) => (a > b ? a : b)));
-  const now = new Date();
-  const sigId = hand ? await saveSignature("STAFF", staff._id, hand.png, "DRAWN", staff._id) : staff.signatureId!;
-  const sig = { id: sigId, at: now, staffId: staff._id, staffName: staff.name };
-  let signed = 0, holidaysSkipped = 0;
-  const skipped: string[] = [];
-  for (const key of new Set(keys.data)) {
-    const [studentId, date] = [key.slice(0, 36), key.slice(37)];
-    if (date > today()) { skipped.push(`${usDate(date)} is in the future`); continue; }
-    const student = await students.findOne({ _id: studentId });
-    if (!student || !canSee(staff, student)) { skipped.push(`${usDate(date)}: not one of your students`); continue; }
-    if (!isClassDay(student, date)) { skipped.push(`${student.name} ${usDate(date)}: not a class day`); continue; }
-    const holiday = holidays.get(date);
-    const e = await entries.findOne({ _id: key });
-    if (isHolidayRow(e, !!holiday)) { holidaysSkipped++; continue; }
-    if (!signable(e, !!holiday)) { skipped.push(`${student.name} ${usDate(date)}: not finished`); continue; }
-    const res = await entries.updateOne({ _id: key, staffSignature: null }, { $set: { staffSignature: sig, updatedAt: now } });
-    if (res.modifiedCount) signed++;
+const entries = async () => (await cols()).entries;
+const ROW_KEY = /^[0-9a-f-]{36}:\d{4}-\d{2}-\d{2}$/;
+const rowKeys = (raw: unknown) => {
+  try {
+    const p = z.array(z.string().regex(ROW_KEY)).min(1).max(3000).safeParse(JSON.parse(String(raw ?? "[]")));
+    return p.success ? [...new Set(p.data)] : null;
+  } catch {
+    return null;
   }
-  await audit(staff._id, "staff.sign_rows", "entries", { signed, skipped: skipped.length, holidaysSkipped, handwritten: !!hand, signatureId: sigId });
-  refresh();
-  const list = (xs: string[]) => `${xs.slice(0, 5).join("; ")}${xs.length > 5 ? ` and ${xs.length - 5} more` : ""}`;
-  const extra =
-    (holidaysSkipped ? ` Holidays are left unsigned (${holidaysSkipped}).` : "") +
-    (skipped.length ? ` Not signed: ${list(skipped)}.` : "");
-  return signed ? { ok: true, message: `Signed ${signed} row${signed === 1 ? "" : "s"}.${extra}` } : { error: `Nothing was signed.${extra}` };
+};
+
+/** The student and row behind a roster key, if this staff member may act on it. */
+async function rowFor(staff: Staff, key: string) {
+  const [studentId, date] = [key.slice(0, 36), key.slice(37)];
+  const { students, entries } = await cols();
+  const student = await students.findOne({ _id: studentId });
+  if (!student || !canSee(staff, student)) return { ok: false, error: "not one of your students" } as const;
+  if (date > today()) return { ok: false, error: `${usDate(date)} hasn't happened yet` } as const;
+  const holiday = (await holidaysBetween(date, date)).has(date);
+  const entry = await entries.findOne({ _id: key });
+  // Once the admin has signed off the month, only admins change it.
+  const signed = await (await cols()).approvals.findOne({ _id: `${studentId}:${date.slice(0, 7)}` }, { projection: { staffName: 1 } });
+  if (signed && staff.role !== "ADMIN") return { ok: false, error: `${student.name}'s ${monthTitle(date.slice(0, 7))} is signed off by ${signed.staffName}` } as const;
+  return { ok: true, student, date, entry, holiday, status: dayStatus(entry, holiday, date, today()) } as const;
 }
 
-const ROW_KEY = /^[0-9a-f-]{36}:\d{4}-\d{2}-\d{2}$/;
-type StaffDoc = Awaited<ReturnType<typeof requireStaff>>;
+const summarize = (done: number, verb: string, problems: string[]) => {
+  const extra = problems.length ? ` Skipped: ${problems.slice(0, 4).join("; ")}${problems.length > 4 ? ` and ${problems.length - 4} more` : ""}.` : "";
+  return done ? { ok: true, message: `${verb} ${done} day${done === 1 ? "" : "s"}.${extra}` } : { error: `Nothing changed.${extra}` };
+};
 
 /**
- * Adds the student's signature on file to one row (a present day with both times, no student
- * signature yet), recorded as added by this staff member. Returns a message for this row.
+ * Approve signed attendance: the student's assigned teacher verifies and signs by hand. One signature
+ * covers every day they ticked, and is stored on each of those days. Only days the student has
+ * signed can be approved. Pending days can be approved at any time (they wait for this teacher).
  */
-async function addStudentSignature(staff: StaffDoc, rowKey: string): Promise<{ ok: boolean; message: string }> {
-  if (!ROW_KEY.test(rowKey)) return { ok: false, message: "Invalid row." };
-  const [studentId, date] = [rowKey.slice(0, 36), rowKey.slice(37)];
-  if (date > today()) return { ok: false, message: `${usDate(date)} is in the future.` };
-  const lock = lockedFor(staff, date);
-  if (lock) return { ok: false, message: lock };
-  const { entries, students } = await cols();
-  const student = await students.findOne({ _id: studentId });
-  if (!student || !canSee(staff, student)) return { ok: false, message: "That student isn't in your courses." };
-  if (!student.signatureId) return { ok: false, message: `${student.name} has no signature on file. Add it at the top of the sheet first.` };
-  const e = await entries.findOne({ _id: rowKey });
-  if (isHolidayRow(e, (await holidaysBetween(date, date)).has(date))) return { ok: false, message: `${usDate(date)} is a holiday: no signature needed.` };
-  if (e?.studentSignature) return { ok: false, message: `${usDate(date)} already has the student's signature.` };
-  if (!needsStudentSig(e)) return { ok: false, message: `${usDate(date)}: enter the start and end time first.` };
+export async function approveRowsAction(_: ActionState, fd: FormData): Promise<ActionState> {
+  const staff = await requireStaff();
+  // The teacher signature column is the student's own teacher's handwritten signature, nobody else's.
+  if (staff.role !== "TEACHER") return { error: "Only the student's teacher signs the teacher signature column. Admins can send a day back or correct it." };
+  const keys = rowKeys(fd.get("rows"));
+  if (!keys) return { error: "Choose the days to approve." };
+  const sig = checkSignaturePng(fd.get("signature"));
+  if ("error" in sig) return { error: "Sign by hand to approve." };
+  const { entries } = await cols();
   const now = new Date();
-  const res = await entries.updateOne(
-    { _id: rowKey, studentSignature: null },
+  const sigId = await saveSignature("STAFF", staff._id, sig.png, "DRAWN", staff._id);
+  const signature = { id: sigId, at: now, staffId: staff._id, staffName: staff.name };
+  let done = 0;
+  const problems: string[] = [];
+  for (const key of keys) {
+    const r = await rowFor(staff, key);
+    if (!r.ok) { problems.push(r.error); continue; }
+    const who = `${r.student.name} ${usDate(r.date)}`;
+    const e = r.entry;
+    if (r.status === "APPROVED") { problems.push(`${who} is already approved`); continue; }
+    if (!e || e.status !== "PRESENT" || !e.studentSignature) { problems.push(`${who} has no signed submission`); continue; }
+    const res = await entries.updateOne(
+      { _id: key, staffSignature: null, status: "PRESENT", "studentSignature.id": e.studentSignature.id },
+      {
+        $set: { staffSignature: signature, correction: null, updatedAt: now },
+        $push: { history: { at: now, byId: staff._id, byName: staff.name, what: "checked and signed by teacher", reason: "" } },
+      },
+    );
+    if (res.modifiedCount) done++; else problems.push(`${who} changed in the meantime`);
+  }
+  await audit(staff._id, "staff.approve", "entries", { approved: done, skipped: problems.length, signatureId: sigId, rows: keys.length });
+  refresh();
+  return summarize(done, "Approved and signed", problems);
+}
+
+/**
+ * Send a submission back to the student: "Needs correction", with the reason they see. The
+ * student fills the day in again (and signs again). Teachers: days not approved yet. Admins can
+ * also reopen an approved day; the approval is kept in the row's history.
+ */
+export async function rejectRowAction(key: string, _: ActionState, fd: FormData): Promise<ActionState> {
+  const staff = await requireStaff();
+  if (!ROW_KEY.test(key)) return { error: "Invalid day." };
+  const reason = String(fd.get("reason") ?? "").trim().slice(0, 300);
+  if (reason.length < 3) return { error: "Tell the student what to fix.", fieldErrors: { reason: "Tell the student what to fix." } };
+  const r = await rowFor(staff, key);
+  if (!r.ok) return { error: `This day is ${r.error}.` };
+  const e = r.entry;
+  if (!e || e.status !== "PRESENT" || !e.studentSignature) return { error: "There is no signed submission to send back." };
+  if (e.staffSignature && staff.role !== "ADMIN") return { error: `Already approved by ${e.staffSignature.staffName}. Ask an admin.` };
+  const now = new Date();
+  const comment: RowComment = { id: newId(), at: now, byId: staff._id, byName: staff.name, byRole: staff.role, text: `Needs correction: ${reason}`, inkId: null };
+  const res = await (await entries()).updateOne(
+    { _id: key, updatedAt: e.updatedAt },
     {
-      $set: { studentSignature: { id: student.signatureId, at: now, addedBy: { staffId: staff._id, staffName: staff.name } }, updatedAt: now },
-      $push: { history: { at: now, byId: staff._id, byName: staff.name, what: "student signature on file added by staff", reason: "filled from the sheet" } },
+      $set: { correction: { byId: staff._id, byName: staff.name, at: now, reason }, staffSignature: null, updatedAt: now },
+      $push: {
+        history: { at: now, byId: staff._id, byName: staff.name, what: `sent back to student${e.staffSignature ? ` (approval by ${e.staffSignature.staffName} removed)` : ""}`, reason },
+        comments: comment,
+      },
     },
   );
-  if (!res.modifiedCount) return { ok: false, message: `${usDate(date)} already has the student's signature.` };
-  await audit(staff._id, "staff.add_student_signature", rowKey, { signatureId: student.signatureId });
-  return { ok: true, message: `Student signature added for ${student.name}, ${usDate(date)}.` };
-}
-
-/** One tap in the "Student signature" cell: fill it with the student's signature on file. Admins only. */
-export async function fillStudentSignatureAction(rowKey: string): Promise<ActionState> {
-  const staff = await requireStaff();
-  if (staff.role !== "ADMIN") return { error: TEACHER_READ_ONLY };
-  const r = await addStudentSignature(staff, rowKey);
-  if (r.ok) refresh();
-  return r.ok ? { ok: true, message: r.message } : { error: r.message };
-}
-
-/** "Fill student signature on all rows": the same as tapping each cell. */
-export async function fillStudentSignaturesAction(rowKeys: string[]): Promise<ActionState> {
-  const staff = await requireStaff();
-  if (staff.role !== "ADMIN") return { error: TEACHER_READ_ONLY };
-  const keys = z.array(z.string().regex(ROW_KEY)).min(1).max(100).safeParse(rowKeys);
-  if (!keys.success) return { error: "Choose the rows to fill." };
-  let added = 0;
-  const problems: string[] = [];
-  for (const k of new Set(keys.data)) {
-    const r = await addStudentSignature(staff, k);
-    if (r.ok) added++; else problems.push(r.message);
-  }
+  if (!res.modifiedCount) return { error: "This day changed in the meantime. Reload the page." };
+  await audit(staff._id, "staff.reject", key, { reason, removedApproval: e.staffSignature ?? null });
   refresh();
-  const extra = problems.length ? ` Not filled: ${problems.slice(0, 3).join(" ")}${problems.length > 3 ? ` and ${problems.length - 3} more.` : ""}` : "";
-  return added ? { ok: true, message: `Student signature added to ${added} row${added === 1 ? "" : "s"}.${extra}` } : { error: `Nothing was filled.${extra}` };
+  return { ok: true, message: `Sent back to ${r.student.name} for ${usDate(r.date)}.` };
 }
-
 /**
- * Swap the signature already on a row for the current one on file: the student's newest
- * signature, or this staff member's own (which also makes them the row's signer). Times are not
- * touched. The old and new signature are kept in the row's history and the audit log.
+ * Taking attendance: mark students Present or Absent for days. Marking present is not approving:
+ * a student who hasn't signed stays "signature missing" until they do. Teachers: this week and
+ * last week, not approved or excused days. Times and signatures the student wrote are kept.
  */
-export async function replaceRowSignatureAction(rowKey: string, which: "student" | "staff"): Promise<ActionState> {
+export async function markRowsAction(_: ActionState, fd: FormData): Promise<ActionState> {
   const staff = await requireStaff();
-  if (!ROW_KEY.test(rowKey) || (which !== "student" && which !== "staff")) return { error: "Invalid row." };
-  if (which === "student" && staff.role !== "ADMIN") return { error: TEACHER_READ_ONLY };
-  if (which === "staff" && staff.role !== "TEACHER") return { error: ROWS_ARE_TEACHERS };
-  const [studentId, date] = [rowKey.slice(0, 36), rowKey.slice(37)];
-  const { entries, students } = await cols();
-  const student = await students.findOne({ _id: studentId });
-  if (!student || !canSee(staff, student)) return { error: "That student isn't in your courses." };
-  // Signatures on locked rows are history: they are never swapped, by anyone. To change such a row
-  // an admin edits it (with a reason), which is recorded.
-  if (isLocked(date)) return { error: `${usDate(date)} is locked, so its signatures are kept as they are. An admin can edit the row if it's wrong.` };
-  const e = await entries.findOne({ _id: rowKey });
+  const keys = rowKeys(fd.get("rows"));
+  if (!keys) return { error: "Choose the students to mark." };
+  const mark = z.enum(["PRESENT", "ABSENT"]).safeParse(fd.get("mark"));
+  if (!mark.success) return { error: "Choose present or absent." };
+  const col = await entries();
   const now = new Date();
-  if (which === "student") {
-    if (!e?.studentSignature) return { error: "This row has no student signature to change. Use Fill with signature." };
-    if (!student.signatureId) return { error: `${student.name} has no signature on file.` };
-    if (e.studentSignature.id === student.signatureId) return { ok: true, message: "This row already uses the current signature." };
-    const res = await entries.updateOne(
-      { _id: rowKey, "studentSignature.id": e.studentSignature.id },
-      {
-        $set: { studentSignature: { id: student.signatureId, at: now, addedBy: { staffId: staff._id, staffName: staff.name } }, updatedAt: now },
-        $push: { history: { at: now, byId: staff._id, byName: staff.name, what: "student signature changed to the one on file", reason: "updated from the sheet" } },
-      },
+  const markedBy = { staffId: staff._id, staffName: staff.name, at: now, mark: mark.data };
+  const word = mark.data === "PRESENT" ? "present" : "absent";
+  let done = 0;
+  const problems: string[] = [];
+  for (const key of keys) {
+    const r = await rowFor(staff, key);
+    if (!r.ok) { problems.push(r.error); continue; }
+    const who = `${r.student.name} ${usDate(r.date)}`;
+    if (staff.role !== "ADMIN") {
+      const lock = teacherLock(r.date, today());
+      if (lock) { problems.push(`${who} is locked`); continue; }
+    }
+    if (!isClassDay(r.student, r.date)) { problems.push(`${who} isn't a class day`); continue; }
+    if (r.status === "HOLIDAY") { problems.push(`${who} is a holiday`); continue; }
+    if (r.status === "APPROVED") { problems.push(`${who} is approved (an admin can change it)`); continue; }
+    if (r.status === "EXCUSED") { problems.push(`${who} is excused (an admin can change it)`); continue; }
+    const history = { at: now, byId: staff._id, byName: staff.name, what: `marked ${word}`, reason: "" };
+    if (!r.entry) {
+      const row: Entry = {
+        _id: key, studentId: r.student._id, date: r.date, status: mark.data, startAt: null, endAt: null, startTime: null, endTime: null, minutes: null,
+        studentSignature: null, staffSignature: null, correction: null, markedBy, excuse: null, note: "", comments: [], history: [history], updatedAt: now,
+      };
+      try { await col.insertOne(row); done++; } catch { problems.push(`${who} changed in the meantime`); }
+      continue;
+    }
+    if (r.entry.status === mark.data && r.entry.markedBy?.mark === mark.data) { done++; continue; }
+    const res = await col.updateOne(
+      { _id: key, updatedAt: r.entry.updatedAt, staffSignature: null, status: { $in: ["PRESENT", "ABSENT"] } },
+      { $set: { status: mark.data, markedBy, updatedAt: now }, $push: { history } },
     );
-    if (!res.modifiedCount) return { error: "The row changed in the meantime. Try again." };
-    await audit(staff._id, "staff.replace_student_signature", rowKey, { from: e.studentSignature.id, to: student.signatureId });
-  } else {
-    if (!staff.signatureId) return { error: NO_SIG };
-    if (!e?.staffSignature) return { error: "This row isn't signed by staff yet. Use Fill with my signature." };
-    // Only your own older signature is updated. Someone else's validation stays theirs.
-    if (e.staffSignature.staffId !== staff._id) return { error: `This row was signed by ${e.staffSignature.staffName}. Their signature is kept.` };
-    if (e.staffSignature.id === staff.signatureId) return { ok: true, message: "This row already has your current signature." };
-    const res = await entries.updateOne(
-      { _id: rowKey, "staffSignature.id": e.staffSignature.id },
-      {
-        $set: { staffSignature: { id: staff.signatureId, at: now, staffId: staff._id, staffName: staff.name }, updatedAt: now },
-        $push: { history: { at: now, byId: staff._id, byName: staff.name, what: `staff signature changed (was ${e.staffSignature.staffName})`, reason: "re-signed from the sheet" } },
-      },
-    );
-    if (!res.modifiedCount) return { error: "The row changed in the meantime. Try again." };
-    await audit(staff._id, "staff.replace_staff_signature", rowKey, { from: e.staffSignature.id, fromStaff: e.staffSignature.staffId, to: staff.signatureId });
+    if (res.modifiedCount) done++; else problems.push(`${who} changed in the meantime`);
   }
+  await audit(staff._id, "staff.mark", "entries", { mark: mark.data, marked: done, skipped: problems.length });
   refresh();
-  return { ok: true, message: `${usDate(date)}: signature updated.` };
+  return summarize(done, `Marked ${word}:`, problems);
 }
 
 /**
- * An admin corrects a row: status, times, note. Teachers can't (the student's entries are theirs). A change to a row that already had values needs a
- * reason, is kept in the row's history, and removes the staff signature so the row is signed again.
+ * Approve or reject an uploaded excuse. Approved: the day becomes Excused (it no longer counts
+ * against the student). Rejected: it stays Absent, with the reason. Teachers decide pending
+ * excuses; admins can also change a decision.
  */
-export async function editRowAction(studentId: string, date: string, _: ActionState, fd: FormData): Promise<ActionState> {
+export async function decideExcuseAction(key: string, _: ActionState, fd: FormData): Promise<ActionState> {
   const staff = await requireStaff();
-  if (staff.role !== "ADMIN") return { error: TEACHER_READ_ONLY };
-  if (!z.string().uuid().safeParse(studentId).success || !DATE_RE.test(date)) return { error: "Invalid row." };
-  if (date > today()) return { error: "You can't fill in a future date." };
+  if (!ROW_KEY.test(key)) return { error: "Invalid day." };
+  const decision = z.enum(["APPROVED", "REJECTED"]).safeParse(fd.get("decision"));
+  if (!decision.success) return { error: "Choose approve or reject." };
+  const reason = String(fd.get("reason") ?? "").trim().slice(0, 300);
+  const r = await rowFor(staff, key);
+  if (!r.ok) return { error: `This day is ${r.error}.` };
+  const e = r.entry;
+  if (!e?.excuse) return { error: "There is no excuse for this day." };
+  if (e.excuse.status !== "PENDING" && staff.role !== "ADMIN") return { error: `This excuse was already ${e.excuse.status.toLowerCase()}. Ask an admin to change it.` };
+  if (e.excuse.status === decision.data) return { ok: true, message: "Nothing changed." };
+  if (decision.data === "REJECTED" && reason.length < 3) return { error: "Say why the excuse is rejected.", fieldErrors: { reason: "Say why." } };
+  const now = new Date();
+  const status: EntryStatus = decision.data === "APPROVED" ? "EXCUSED" : "ABSENT";
+  const res = await (await entries()).updateOne(
+    { _id: key, updatedAt: e.updatedAt },
+    {
+      $set: {
+        status, updatedAt: now,
+        "excuse.status": decision.data, "excuse.decidedBy": { id: staff._id, name: staff.name, role: staff.role }, "excuse.decidedAt": now, "excuse.reason": reason,
+      },
+      $push: { history: { at: now, byId: staff._id, byName: staff.name, what: `excuse ${decision.data.toLowerCase()} (was ${e.excuse.status.toLowerCase()})`, reason } },
+    },
+  );
+  if (!res.modifiedCount) return { error: "This day changed in the meantime. Reload the page." };
+  await audit(staff._id, decision.data === "APPROVED" ? "staff.approve_excuse" : "staff.reject_excuse", key, { from: e.excuse.status, reason, fileId: e.excuse.fileId });
+  refresh();
+  return { ok: true, message: decision.data === "APPROVED" ? `Excuse approved: ${r.student.name}, ${usDate(r.date)} is now Excused.` : `Excuse rejected: ${usDate(r.date)} stays Absent.` };
+}
+
+// ---------- Admin: "Approved by" at the bottom of the month ----------
+
+/**
+ * The admin (for example Mahek) signs off students' months: the "Approved by" section at the bottom
+ * of the sheet, with her name, position, a handwritten signature and optional comments. One
+ * signature can sign off many students at once. A student is skipped while any of their days that
+ * month still wait for the teacher (Pending or Needs correction). Signing again replaces the
+ * earlier sign-off, which is kept in the audit log. A signed month is closed for students and
+ * teachers; if an admin changes a day afterwards, the sign-off shows as out of date.
+ */
+export async function signMonthsAction(_: ActionState, fd: FormData): Promise<ActionState> {
+  const staff = await requireStaff();
+  if (staff.role !== "ADMIN" || !staff.signsOff) return { error: "Only the admin who signs the “Approved by” section (set on the Staff page) can sign off months." };
+  const month = String(fd.get("month") ?? "");
+  if (!MONTH_RE.test(month) || month > thisMonth()) return { error: "Choose a month." };
+  let ids: string[] = [];
+  try {
+    const p = z.array(z.string().uuid()).min(1).max(2000).safeParse(JSON.parse(String(fd.get("students") ?? "[]")));
+    if (p.success) ids = [...new Set(p.data)];
+  } catch { /* handled below */ }
+  if (!ids.length) return { error: "Choose the students to sign off." };
+  const sig = checkSignaturePng(fd.get("signature"));
+  if ("error" in sig) return { error: "Sign by hand to sign off the month." };
+  // Always the signer's own name and position from her account: nothing typed in can change who it says.
+  const staffName = staff.name, position = staff.position;
+  const comments = String(fd.get("comments") ?? "").trim().slice(0, 600);
+  const { students, entries, approvals } = await cols();
+  const now = new Date();
+  const signatureId = await saveSignature("STAFF", staff._id, sig.png, "DRAWN", staff._id);
+  const holidays = await holidaysBetween(`${month}-01`, `${month}-31`);
+  let done = 0;
+  const problems: string[] = [];
+  for (const s of await students.find({ _id: { $in: ids } }).toArray()) {
+    // Signed at the end of the month, like the paper sheet (or once the student's course has ended).
+    if (month >= thisMonth() && s.endDate >= today()) { problems.push(`${s.name}: ${monthTitle(month)} isn't over yet`); continue; }
+    const list = await entries.find({ studentId: s._id, date: { $gte: `${month}-01`, $lte: `${month}-31` } }).toArray();
+    const waiting = list.filter((e) => ["PENDING", "NEEDS_CORRECTION"].includes(dayStatus(e, holidays.has(e.date), e.date, today()))).length;
+    if (waiting) { problems.push(`${s.name}: ${waiting} day${waiting === 1 ? "" : "s"} still waiting for the teacher`); continue; }
+    if (!list.length) { problems.push(`${s.name}: nothing recorded`); continue; }
+    const id = `${s._id}:${month}`;
+    const existing = await approvals.findOne({ _id: id });
+    await approvals.updateOne(
+      { _id: id },
+      { $set: { studentId: s._id, month, staffId: staff._id, staffName, position, signatureId, comments, commentsInkId: null, entriesHash: entriesHash(list), signedAt: now } },
+      { upsert: true },
+    );
+    await audit(staff._id, "admin.sign_month", id, {
+      staffName, position, signatureId, rows: list.length,
+      replaced: existing ? { staffId: existing.staffId, staffName: existing.staffName, signatureId: existing.signatureId, signedAt: existing.signedAt } : null,
+    });
+    done++;
+  }
+  refresh();
+  const extra = problems.length ? ` Not signed: ${problems.slice(0, 4).join("; ")}${problems.length > 4 ? ` and ${problems.length - 4} more` : ""}.` : "";
+  return done ? { ok: true, message: `Signed off ${monthTitle(month)} for ${done} student${done === 1 ? "" : "s"}.${extra}` } : { error: `Nothing was signed.${extra}` };
+}
+
+/** The admin takes a month's sign-off off again (to let the student or teacher fix something). Kept in the audit log. */
+export async function removeMonthSignOffAction(studentId: string, month: string, _: ActionState, __: FormData): Promise<ActionState> {
+  const staff = await requireStaff();
+  if (staff.role !== "ADMIN") return { error: "Only an admin can do this." };
+  if (!z.string().uuid().safeParse(studentId).success || !MONTH_RE.test(month)) return { error: "Invalid month." };
+  const gone = await (await cols()).approvals.findOneAndDelete({ _id: `${studentId}:${month}` });
+  if (!gone) return { ok: true, message: "This month isn't signed off." };
+  await audit(staff._id, "admin.remove_month_sign_off", `${studentId}:${month}`, { removed: gone });
+  refresh();
+  return { ok: true, message: `Sign-off for ${monthTitle(month)} removed. The month is open again.` };
+}
+
+// ---------- Admin corrections ----------
+
+/**
+ * An admin corrects or adds one day: status, times, a note, and optionally a document for an
+ * excused absence. Works on any date. The original values are kept in the row's history and the
+ * audit log. The student's own signature is never written or imitated: a day an admin records as
+ * present without the student's signature stays "signature missing". Changing a day takes its
+ * approval off, so it is approved again.
+ */
+export async function adminEditRowAction(studentId: string, date: string, _: ActionState, fd: FormData): Promise<ActionState> {
+  const staff = await requireStaff();
+  if (staff.role !== "ADMIN") return { error: "Only an admin can correct attendance. Send the day back to the student instead." };
+  if (!z.string().uuid().safeParse(studentId).success || !DATE_RE.test(date)) return { error: "Invalid day." };
+  if (date > today()) return { error: "You can't record a future date." };
   const status = z.enum(["PRESENT", "ABSENT", "EXCUSED", "HOLIDAY"]).safeParse(fd.get("status"));
   if (!status.success) return { fieldErrors: { status: "Choose a status" } };
-  const startTime = String(fd.get("startTime") ?? "").trim() || null;
-  const endTime = String(fd.get("endTime") ?? "").trim() || null;
+  const rawStart = String(fd.get("startTime") ?? "").trim(), rawEnd = String(fd.get("endTime") ?? "").trim();
   const note = String(fd.get("note") ?? "").trim().slice(0, 200);
-  const reason = String(fd.get("reason") ?? "").trim().slice(0, 200);
-  let minutes: number | null = null;
-  if (status.data === "PRESENT") {
-    if (!startTime || !TIME_RE.test(startTime)) return { fieldErrors: { startTime: "Enter the start time" } };
-    if (endTime && !TIME_RE.test(endTime)) return { fieldErrors: { endTime: "Enter a valid end time" } };
-    if (endTime) {
-      minutes = minutesBetween(startTime, endTime);
-      if (minutes === null) return { fieldErrors: { endTime: "End must be after start" } };
-    }
-  }
-  const lock = lockedFor(staff, date);
-  if (lock) return { error: lock };
-  const { entries, students } = await cols();
-  const student = await students.findOne({ _id: studentId });
-  if (!student || !canSee(staff, student)) return { error: "That student isn't in your courses." };
-  if (!isClassDay(student, date)) return { error: "That isn't one of this student's class days." };
-  const id = `${studentId}:${date}`;
-  const lockedRow = isLocked(date);
-  const before = await entries.findOne({ _id: id });
+  const reason = String(fd.get("reason") ?? "").trim().slice(0, 300);
   const present = status.data === "PRESENT";
-  const after = { status: status.data, startTime: present ? startTime : null, endTime: present ? endTime : null, minutes, note };
-  const changed = !before || before.status !== after.status || before.startTime !== after.startTime || before.endTime !== after.endTime || (before.note ?? "") !== note;
+  let startTime: string | null = null, endTime: string | null = null;
+  if (present && (rawStart || rawEnd)) {
+    startTime = parseTime(rawStart); endTime = parseTime(rawEnd);
+    if (!startTime) return { fieldErrors: { startTime: "Enter the start time" } };
+    if (!endTime) return { fieldErrors: { endTime: "Enter the end time" } };
+    if (minutesBetween(startTime, endTime) === null) return { fieldErrors: { endTime: "End must be after start" } };
+  }
+  // An optional document (an excuse for an older date, a note handed in on paper).
+  const file = fd.get("file");
+  let upload: { buf: Uint8Array; mime: NonNullable<ReturnType<typeof sniffExcuse>>; name: string } | null = null;
+  if (file instanceof File && file.size) {
+    if (file.size > EXCUSE_MAX_BYTES) return { fieldErrors: { file: "4 MB max." } };
+    const buf = new Uint8Array(await file.arrayBuffer());
+    const mime = sniffExcuse(buf);
+    if (!mime) return { fieldErrors: { file: "Only PDF, JPG or PNG." } };
+    upload = { buf, mime, name: safeFileName(file.name, mime) };
+  }
+
+  const { entries: col, students, excuseFiles } = await cols();
+  const student = await students.findOne({ _id: studentId });
+  if (!student) return { error: "Student not found." };
+  if (date < student.startDate || date > student.endDate) return { error: `${usDate(date)} is outside ${student.name}'s course dates.` };
+  const id = `${studentId}:${date}`;
+  const before = await col.findOne({ _id: id });
+  const keepTimes = present && !rawStart && !rawEnd && before?.status === "PRESENT";
+  if (keepTimes) { startTime = before!.startTime; endTime = before!.endTime; }
+  const changed = !before || before.status !== status.data || before.startTime !== startTime || before.endTime !== endTime || (before.note ?? "") !== note || !!upload;
   if (!changed) return { ok: true, message: "Nothing changed." };
-  const hadValues = !!before && (!!before.startTime || before.status !== "PRESENT" || !!before.staffSignature);
-  if ((hadValues || lockedRow) && reason.length < 3) return { fieldErrors: { reason: lockedRow ? "This row is locked. Say why you're changing it" : "Say why you're changing this row" } };
+  if (before && reason.length < 3) return { fieldErrors: { reason: "Say why you're changing this day" } };
   const now = new Date();
-  const what = `${before ? `${before.status} ${time12(before.startTime)}-${time12(before.endTime)}` : "empty"} → ${after.status} ${time12(after.startTime)}-${time12(after.endTime)}`;
-  await entries.updateOne(
+  let excuse: Excuse | null | undefined = undefined;
+  if (upload) {
+    const fileId = newId();
+    await excuseFiles.insertOne({ _id: fileId, studentId, date, name: upload.name, mime: upload.mime, size: upload.buf.length, data: new Binary(Buffer.from(upload.buf)), at: now });
+    excuse = {
+      fileId, fileName: upload.name, mime: upload.mime, size: upload.buf.length, note: note || reason, at: now,
+      status: status.data === "EXCUSED" ? "APPROVED" : "PENDING",
+      decidedBy: status.data === "EXCUSED" ? { id: staff._id, name: staff.name, role: staff.role } : null, decidedAt: status.data === "EXCUSED" ? now : null, reason: "",
+    };
+  } else if (status.data === "EXCUSED" && before?.excuse && before.excuse.status !== "APPROVED") {
+    excuse = { ...before.excuse, status: "APPROVED", decidedBy: { id: staff._id, name: staff.name, role: staff.role }, decidedAt: now };
+  }
+  const describe = (e: Pick<Entry, "status" | "startTime" | "endTime"> | null) =>
+    e ? `${STATUS_LABEL[e.status === "PRESENT" ? "PENDING" : e.status].replace("Pending", "Present")}${e.status === "PRESENT" && e.startTime ? ` ${time12(e.startTime)}–${time12(e.endTime)}` : ""}` : "nothing recorded";
+  const after = { status: status.data, startTime: present ? startTime : null, endTime: present ? endTime : null, minutes: null, note };
+  const timesChanged = before?.startTime !== after.startTime || before?.endTime !== after.endTime;
+  const what = `admin: ${describe(before)} → ${describe(after)}${before?.staffSignature ? ` (approval by ${before.staffSignature.staffName} removed)` : ""}${upload ? `; document ${upload.name}` : ""}`;
+  await col.updateOne(
     { _id: id },
     {
       $set: {
-        ...after, staffSignature: null, updatedAt: now,
-        // A time written by staff wasn't typed late by the student, so its late-entry flag goes.
-        // The student's handwritten time no longer matches either, so the sheet shows staff's time.
-        ...(before?.startTime !== after.startTime ? { startLateBy: null, startInkId: null } : {}),
-        ...(before?.endTime !== after.endTime ? { endLateBy: null, endInkId: null } : {}),
+        ...after, staffSignature: null, correction: null, updatedAt: now,
+        // The student's handwritten time no longer matches a corrected time, so the corrected one shows.
+        ...(timesChanged ? { startInkId: null, endInkId: null, lunchStartInkId: null, lunchEndInkId: null } : {}),
+        ...(excuse !== undefined ? { excuse } : {}),
       },
-      $setOnInsert: { studentId, date, startAt: null, endAt: null, studentSignature: null, comments: [] },
-      $push: { history: { at: now, byId: staff._id, byName: staff.name, what, reason: reason || "filled in by staff" } },
+      $setOnInsert: { studentId, date, startAt: null, endAt: null, studentSignature: null, markedBy: null, comments: [], ...(excuse === undefined ? { excuse: null } : {}) },
+      $push: { history: { at: now, byId: staff._id, byName: staff.name, what, reason: reason || "added by admin" } },
     },
     { upsert: true },
   );
-  await audit(staff._id, lockedRow ? "admin.edit_locked_row" : "staff.edit_row", id, {
-    before: before ? { status: before.status, startTime: before.startTime, endTime: before.endTime, staffSignature: before.staffSignature ?? null } : null, after, reason,
+  await audit(staff._id, before ? "admin.edit_day" : "admin.add_day", id, {
+    reason,
+    before: before ? {
+      status: before.status, startTime: before.startTime, endTime: before.endTime, minutes: before.minutes, note: before.note,
+      startInkId: before.startInkId ?? null, endInkId: before.endInkId ?? null, lunchStartInkId: before.lunchStartInkId ?? null, lunchEndInkId: before.lunchEndInkId ?? null, staffSignature: before.staffSignature ?? null, excuse: before.excuse ? { ...before.excuse } : null,
+    } : null,
+    after, document: upload?.name ?? null,
   });
   refresh();
-  return { ok: true, message: `${student.name}, ${usDate(date)} saved. The teacher signs the row again.` };
+  return { ok: true, message: `${student.name}, ${usDate(date)} saved.${present && !before?.studentSignature ? " The student's signature stays missing until they sign." : ""}` };
 }
 
-/** End of day: every listed student with no start time is marked absent. Admins only. */
-export async function markAbsentAction(date: string, _: ActionState, fd: FormData): Promise<ActionState> {
-  const staff = await requireStaff();
-  if (staff.role !== "ADMIN") return { error: TEACHER_READ_ONLY };
-  if (!DATE_RE.test(date) || date > today()) return { error: "Invalid date." };
-  const lock = lockedFor(staff, date);
-  if (lock) return { error: lock };
-  if ((await holidaysBetween(date, date)).get(date)) return { error: "That date is a holiday." };
-  const ids = z.array(z.string().uuid()).max(1000).safeParse(JSON.parse(String(fd.get("students") ?? "[]")));
-  if (!ids.success || !ids.data.length) return { error: "No students to mark." };
-  const { entries, students } = await cols();
-  const now = new Date();
-  let marked = 0;
-  for (const s of await students.find({ _id: { $in: ids.data } }).toArray()) {
-    if (!canSee(staff, s) || !isClassDay(s, date)) continue;
-    const res = await entries.updateOne(
-      { _id: `${s._id}:${date}` },
-      {
-        $setOnInsert: {
-          studentId: s._id, date, status: "ABSENT" as EntryStatus, startAt: null, endAt: null, startTime: null, endTime: null, minutes: null,
-          studentSignature: null, staffSignature: null, note: "", updatedAt: now, comments: [],
-          history: [{ at: now, byId: staff._id, byName: staff.name, what: "marked absent", reason: "no start time" }],
-        },
-      },
-      { upsert: true },
-    );
-    if (res.upsertedCount) marked++;
-  }
-  await audit(staff._id, "staff.mark_absent", date, { marked });
-  refresh();
-  return { ok: true, message: `${marked} student${marked === 1 ? "" : "s"} marked absent.` };
-}
-
-/**
- * The "Approved by" block at the bottom of the month, signed by an admin: staff name and position (as typed, defaulting to the account), signature (on file, or signed by hand now) and
- * comments (typed and/or handwritten) for the month. Approving again replaces the approval; the one
- * it replaces is kept in the audit log.
- */
-export async function approveMonthAction(studentId: string, month: string, _: ActionState, fd: FormData): Promise<ActionState> {
-  const staff = await requireStaff();
-  if (staff.role !== "ADMIN") return { error: APPROVAL_IS_ADMINS };
-  if (!z.string().uuid().safeParse(studentId).success || !MONTH_RE.test(month) || month > thisMonth()) return { error: "Invalid month." };
-  const rawHand = String(fd.get("signature") ?? "");
-  const hand = rawHand ? checkSignaturePng(rawHand) : null;
-  if (hand && "error" in hand) return { error: hand.error };
-  if (!hand && !staff.signatureId) return { error: NO_SIG };
-  const rawInk = String(fd.get("commentsInk") ?? "");
-  const ink = rawInk ? checkNotePng(rawInk) : null;
-  if (ink && "error" in ink) return { error: ink.error };
-  const student = await (await cols()).students.findOne({ _id: studentId });
-  if (!student || !canSee(staff, student)) return { error: "That student isn't in your courses." };
-  const comments = String(fd.get("comments") ?? "").trim().slice(0, 600);
-  // "STAFF NAME/POSITION" on the form. Defaults to the account; the account id is always recorded.
-  const staffName = String(fd.get("staffName") ?? staff.name).trim().replace(/\s+/g, " ").slice(0, 80);
-  const position = String(fd.get("position") ?? staff.position).trim().replace(/\s+/g, " ").slice(0, 60);
-  if (staffName.length < 2) return { fieldErrors: { staffName: "Enter your name as it should be printed" } };
-  const { entries, approvals } = await cols();
-  const list = await entries.find({ studentId, date: { $gte: `${month}-01`, $lte: `${month}-31` } }).toArray();
-  if (!list.length) return { error: "There is nothing to approve for this month yet." };
-  const existing = await approvals.findOne({ _id: `${studentId}:${month}` });
-  const signatureId = hand ? await saveSignature("STAFF", staff._id, hand.png, "DRAWN", staff._id) : staff.signatureId!;
-  const commentsInkId = ink ? await saveSignature("STAFF", staff._id, ink.png, "DRAWN", staff._id, "NOTE") : null;
-  const now = new Date();
-  // Only replace the approval we looked at, so two people approving at once can't overwrite each other unseen.
-  const res = await approvals.updateOne(
-    existing ? { _id: existing._id, signedAt: existing.signedAt } : { _id: `${studentId}:${month}` },
-    { $set: { studentId, month, staffId: staff._id, staffName, position, signatureId, comments, commentsInkId, entriesHash: entriesHash(list), signedAt: now } },
-    { upsert: !existing },
-  );
-  if (existing && !res.matchedCount) return { error: "Someone else approved this month just now. Reload the page." };
-  await audit(staff._id, "staff.approve_month", `${studentId}:${month}`, {
-    rows: list.length, handwritten: !!hand, handwrittenComments: !!commentsInkId, staffName, position, account: staff.name,
-    replaced: existing ? { staffId: existing.staffId, staffName: existing.staffName, signatureId: existing.signatureId, signedAt: existing.signedAt } : null,
-  });
-  refresh();
-  return { ok: true, message: "Month approved." };
-}
-
-/**
- * A comment on one row (typed, handwritten, or both). Comments are added to the row, never edited,
- * and don't touch its times or signatures. Teachers can comment while the row is open; admins any time.
- */
-export async function addCommentAction(rowKey: string, _: ActionState, fd: FormData): Promise<ActionState> {
-  const staff = await requireStaff();
-  if (!ROW_KEY.test(rowKey)) return { error: "Invalid row." };
-  const [studentId, date] = [rowKey.slice(0, 36), rowKey.slice(37)];
-  const lock = lockedFor(staff, date);
-  if (lock) return { error: lock };
-  const text = String(fd.get("text") ?? "").trim().slice(0, 500);
-  const rawInk = String(fd.get("ink") ?? "");
-  const ink = rawInk ? checkNotePng(rawInk) : null;
-  if (ink && "error" in ink) return { error: ink.error };
-  if (!text && !ink) return { error: "Type or write a comment first." };
-  const { entries, students } = await cols();
-  const student = await students.findOne({ _id: studentId });
-  if (!student || !canSee(staff, student)) return { error: "That student isn't in your courses." };
-  const e = await entries.findOne({ _id: rowKey }, { projection: { comments: 1 } });
-  if (!e) return { error: "Nothing is recorded for this day yet. Use Edit to record it, then add a comment." };
-  if ((e.comments?.length ?? 0) >= 50) return { error: "This row has too many comments." };
-  const inkId = ink ? await saveSignature("STAFF", staff._id, ink.png, "DRAWN", staff._id, "NOTE") : null;
-  const c: RowComment = { id: newId(), at: new Date(), byId: staff._id, byName: staff.name, byRole: staff.role, text, inkId };
-  await entries.updateOne({ _id: rowKey }, { $push: { comments: c } });
-  await audit(staff._id, "staff.comment", rowKey, { commentId: c.id, handwritten: !!inkId });
-  refresh();
-  return { ok: true, message: `Comment added to ${usDate(date)}.` };
-}
-
-/**
- * A day off for one class (a course): every student of the course with class that day gets the day
- * marked Holiday (or Excused) with a note. Days a student has already started are left alone.
- * "Remove" takes the mark off again where nothing else was recorded. Admins only (it writes on the
- * students' rows). Future days are allowed (up to a year ahead) so a closure can be planned.
- */
+/** A day off for one class: marks the day Holiday or Excused for everyone in the course. Admins only. */
 export async function markCourseDayAction(_: ActionState, fd: FormData): Promise<ActionState> {
   const staff = await requireStaff();
   if (staff.role !== "ADMIN") return { error: "Only an admin can mark a class day off." };
@@ -411,9 +413,6 @@ export async function markCourseDayAction(_: ActionState, fd: FormData): Promise
   if (!course) return { fieldErrors: { course: "Choose a class" } };
   if (!mode.success) return { fieldErrors: { status: "Choose what to mark" } };
   if (mode.data !== "REMOVE" && note.length < 2) return { fieldErrors: { note: "Add a short note (it's written on the sheet)" } };
-  if (staff.role !== "ADMIN" && !staff.courses.includes(course)) return { error: "That class isn't one of yours." };
-  const lock = lockedFor(staff, date);
-  if (lock) return { error: lock };
   if ((await holidaysBetween(date, date)).get(date)) return { error: "That date is already a school-wide holiday." };
   const { entries, students } = await cols();
   const list = (await students.find({ courseName: course, active: true, startDate: { $lte: date }, endDate: { $gte: date } }).toArray()).filter((s) => isClassDay(s, date));
@@ -460,18 +459,6 @@ export async function markCourseDayAction(_: ActionState, fd: FormData): Promise
     message: `${usDate(date)} marked ${mode.data.toLowerCase()} for ${changed} student${changed === 1 ? "" : "s"} in ${course}.` +
       (kept.length ? ` Left as recorded (already started or signed): ${kept.slice(0, 5).join(", ")}${kept.length > 5 ? "…" : ""}.` : ""),
   };
-}
-
-/** A teacher or admin puts their own handwritten signature on file. A new one replaces it for future signing only. */
-export async function saveMySignatureAction(_: ActionState, fd: FormData): Promise<ActionState> {
-  const staff = await requireStaff();
-  const checked = checkSignaturePng(fd.get("signature"));
-  if ("error" in checked) return { error: checked.error };
-  const id = await saveSignature("STAFF", staff._id, checked.png, "DRAWN", staff._id);
-  await (await cols()).staff.updateOne({ _id: staff._id }, { $set: { signatureId: id } });
-  await audit(staff._id, "staff.signature_on_file", staff._id, { signatureId: id });
-  refresh();
-  return { ok: true, message: staff.role === "ADMIN" ? "Signature on file. You can now approve months with one tap." : "Signature on file. You can now sign rows with one tap." };
 }
 
 export async function changePasswordAction(_: ActionState, fd: FormData): Promise<ActionState> {

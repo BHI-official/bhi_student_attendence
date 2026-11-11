@@ -1,13 +1,10 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { redirect } from "next/navigation";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
-import { EMPTY_PROFILE, audit, cols, isDuplicateKey, newId, type Student, type StudentProfile } from "@/lib/db";
+import { EMPTY_PROFILE, audit, cols, isDuplicateKey, newId, type Staff, type Student, type StudentProfile } from "@/lib/db";
 import { requireAdmin } from "@/lib/auth";
-import { canSee } from "@/lib/access";
-import { checkSignaturePng, saveSignature } from "@/lib/signatures";
 import { DATE_RE, parseDate, parseStudentsCsv, type StudentInput } from "@/lib/sheet";
 import { PIN_RE, weakPin } from "@/lib/pin";
 import { freePin, pinKey, pinTaken } from "@/lib/pins";
@@ -23,7 +20,7 @@ async function typedPinProblem(pin: string, exceptStudentId?: string) {
 }
 const DEFAULT_DAYS = [1, 2, 3, 4, 5];
 
-function studentFields(fd: FormData): { value?: Omit<StudentInput, "pin"> & { classDays: number[] }; errors?: Record<string, string> } {
+function studentFields(fd: FormData): { value?: Omit<StudentInput, "pin" | "teacherEmail"> & { classDays: number[] }; errors?: Record<string, string> } {
   const get = (k: string) => String(fd.get(k) ?? "").trim();
   const errors: Record<string, string> = {};
   const name = get("name").replace(/\s+/g, " ");
@@ -33,7 +30,7 @@ function studentFields(fd: FormData): { value?: Omit<StudentInput, "pin"> & { cl
   if (!startDate) errors.startDate = "Enter the start date";
   if (!endDate) errors.endDate = "Enter the end date";
   if (startDate && endDate && endDate < startDate) errors.endDate = "End date must be after the start date";
-  const classDays = fd.getAll("classDays").map(Number).filter((d) => d >= 1 && d <= 7);
+  const classDays = [...new Set(fd.getAll("classDays").map(Number).filter((d) => d >= 1 && d <= 5))].sort();
   if (!classDays.length) errors.classDays = "Choose at least one class day";
   if (Object.keys(errors).length) return { errors };
   return {
@@ -62,10 +59,13 @@ export async function saveStudentAction(studentId: string | null, _: ActionState
     const problem = await typedPinProblem(typed);
     if (problem) return { fieldErrors: { pin: problem } };
   }
+  const teacherId = String(fd.get("teacherId") ?? "");
+  const teacher = teacherId ? await activeTeacher(teacherId) : null;
+  if (teacherId && !teacher) return { fieldErrors: { teacherId: "Choose a teacher from the list" } };
   const pin = typed || (await freePin());
   const s: Student = {
     _id: newId(), ...f.value, nameLower: f.value.name.toLowerCase(), pinHash: await bcrypt.hash(pin, 10), pinKey: pinKey(pin),
-    signatureId: null, profile: { ...EMPTY_PROFILE }, active: true, createdAt: new Date(),
+    teacherId: null, profile: { ...EMPTY_PROFILE }, active: true, createdAt: new Date(),
   };
   try {
     await students.insertOne(s);
@@ -74,6 +74,7 @@ export async function saveStudentAction(studentId: string | null, _: ActionState
     throw e;
   }
   await audit(staff._id, "admin.add_student", s._id, { name: s.name });
+  if (teacher) await setTeacher(s, teacher, staff);
   refresh();
   return { ok: true, message: `${s.name} added. Their PIN is ${pin}. Give it to them now; it isn't shown again.`, data: { id: s._id, pin } };
 }
@@ -106,6 +107,12 @@ export async function importStudentsAction(_: ActionState, fd: FormData): Promis
     typedSeen.set(r.pin, r.name);
   }
   if (pinErrors.length) return { error: `Nothing was imported. Every student needs their own PIN: ${pinErrors.slice(0, 8).join(" ")}${pinErrors.length > 8 ? ` (${pinErrors.length - 8} more)` : ""} Leave the pin column empty to get random ones.` };
+  // Optional teacherEmail column: the teacher whose roster the student goes on.
+  const { staff: staffCol } = await cols();
+  const emails = [...new Set(add.map((r) => r.teacherEmail).filter(Boolean))];
+  const teachers = new Map((await staffCol.find({ email: { $in: emails }, role: "TEACHER", active: true }).toArray()).map((t) => [t.email, t]));
+  const unknown = emails.filter((e) => !teachers.has(e));
+  if (unknown.length) return { error: `Nothing was imported. No active teacher has the email ${unknown.slice(0, 5).join(", ")}${unknown.length > 5 ? "…" : ""}. Add the teacher first, or leave teacherEmail empty.` };
   const used = new Set(typedSeen.keys());
   const pins: { name: string; pin: string }[] = [];
   const docs: Student[] = [];
@@ -116,7 +123,7 @@ export async function importStudentsAction(_: ActionState, fd: FormData): Promis
     docs.push({
       _id: newId(), name: r.name, nameLower: r.name.toLowerCase(), pinHash: await bcrypt.hash(pin, 10), pinKey: pinKey(pin), courseName: r.courseName, courseCode: r.courseCode,
       courseDuration: r.courseDuration, caseManager: r.caseManager, instructor: r.instructor, startDate: r.startDate, endDate: r.endDate,
-      classDays: DEFAULT_DAYS, signatureId: null, profile: { ...EMPTY_PROFILE }, active: true, createdAt: new Date(),
+      classDays: DEFAULT_DAYS, teacherId: null, profile: { ...EMPTY_PROFILE }, active: true, createdAt: new Date(),
     });
   }
   if (docs.length) {
@@ -128,6 +135,10 @@ export async function importStudentsAction(_: ActionState, fd: FormData): Promis
       if (isDuplicateKey(e)) return { error: "Nothing was imported: a PIN was given to another student at the same moment. Import the file again." };
       throw e;
     }
+  }
+  for (const [i, d] of docs.entries()) {
+    const t = add[i].teacherEmail ? teachers.get(add[i].teacherEmail) : null;
+    if (t) await setTeacher(d, t, staff);
   }
   await audit(staff._id, "admin.import_students", "students", { added: docs.length, skipped: skip.length });
   refresh();
@@ -215,13 +226,12 @@ const staffSchema = z.object({
 /** Admin creates a teacher or admin account with a temporary password (they change it after signing in). */
 export async function createStaffAction(_: ActionState, fd: FormData): Promise<ActionState> {
   const admin = await requireAdmin();
-  const p = staffSchema.safeParse({ ...Object.fromEntries(fd), courses: undefined });
-  const courses = fd.getAll("courses").map(String).filter(Boolean).slice(0, 50);
+  const p = staffSchema.safeParse(Object.fromEntries(fd));
   if (!p.success) return { fieldErrors: Object.fromEntries(p.error.issues.map((i) => [String(i.path[0]), i.message])) };
   try {
     await (await cols()).staff.insertOne({
       _id: newId(), name: p.data.name, email: p.data.email, position: p.data.position, role: p.data.role,
-      courses: p.data.role === "ADMIN" ? [] : courses, passwordHash: await bcrypt.hash(p.data.password, 12), signatureId: null, active: true, createdAt: new Date(),
+      passwordHash: await bcrypt.hash(p.data.password, 12), active: true, createdAt: new Date(),
     });
   } catch (e) {
     if (isDuplicateKey(e)) return { fieldErrors: { email: "That email already has an account" } };
@@ -256,22 +266,12 @@ export async function setStaffRoleAction(staffId: string, _: ActionState, fd: Fo
   const before = await staff.findOne({ _id: staffId }, { projection: { role: 1, name: 1 } });
   if (!before) return { error: "Account not found." };
   if (before.role === role.data) return { ok: true, message: "Nothing changed." };
-  await staff.updateOne({ _id: staffId }, { $set: { role: role.data } });
+  await staff.updateOne({ _id: staffId }, { $set: { role: role.data, ...(role.data === "TEACHER" ? { signsOff: false } : {}) } });
   await audit(admin._id, "admin.set_role", staffId, { from: before.role, to: role.data });
   refresh();
-  return { ok: true, message: `${before.name} is now ${role.data === "ADMIN" ? "an admin: they sign in on the admin page and sign the month at the bottom" : "a teacher: they sign in on the teacher page and sign each row"}.` };
+  return { ok: true, message: `${before.name} is now ${role.data === "ADMIN" ? "an admin: they sign in on the admin page and see every student" : "a teacher: they sign in on the teacher page and see the students assigned to them"}.` };
 }
 
-/** Admin: which courses a teacher can see. */
-export async function setStaffCoursesAction(staffId: string, _: ActionState, fd: FormData): Promise<ActionState> {
-  const admin = await requireAdmin();
-  const courses = fd.getAll("courses").map(String).filter(Boolean).slice(0, 50);
-  const res = await (await cols()).staff.updateOne({ _id: staffId, role: "TEACHER" }, { $set: { courses } });
-  if (!res.matchedCount) return { error: "Teacher not found." };
-  await audit(admin._id, "admin.set_teacher_courses", staffId, { courses });
-  refresh();
-  return { ok: true, message: courses.length ? `Courses saved (${courses.length}).` : "No courses: this teacher sees no students." };
-}
 
 /** Admin sets a new temporary password for a staff member who forgot theirs. */
 export async function resetStaffPasswordAction(staffId: string, _: ActionState, fd: FormData): Promise<ActionState> {
@@ -284,37 +284,7 @@ export async function resetStaffPasswordAction(staffId: string, _: ActionState, 
   return { ok: true, message: "Temporary password set. They're signed out everywhere and can sign in with it." };
 }
 
-/**
- * An admin puts a student's signature on file for them (the student signs by hand on the admin's
- * screen), or removes it so the student adds it again. Teachers can't: it is the student's signature. Past rows keep the signature they were signed with.
- */
-export async function setStudentSignatureAction(studentId: string, _: ActionState, fd: FormData): Promise<ActionState> {
-  const staff = await requireAdmin();
-  const { students } = await cols();
-  const student = await students.findOne({ _id: studentId });
-  if (!student || !canSee(staff, student)) return { error: "Student not found." };
-  if (fd.get("clear") === "1") {
-    await students.updateOne({ _id: studentId }, { $set: { signatureId: null } });
-    await audit(staff._id, "staff.clear_student_signature", studentId);
-    refresh();
-    return { ok: true, message: "Signature removed. The student adds a new one the next time they sign in." };
-  }
-  const checked = checkSignaturePng(fd.get("signature"));
-  if ("error" in checked) return { error: checked.error };
-  const id = await saveSignature("STUDENT", studentId, checked.png, "DRAWN", staff._id);
-  await students.updateOne({ _id: studentId }, { $set: { signatureId: id } });
-  await audit(staff._id, "staff.set_student_signature", studentId, { signatureId: id });
-  refresh();
-  return { ok: true, message: `Signature on file for ${student.name}.` };
-}
 
-export async function goToSheetAction(_: ActionState, fd: FormData): Promise<ActionState> {
-  await requireAdmin();
-  const id = String(fd.get("studentId") ?? "");
-  const month = String(fd.get("month") ?? "");
-  if (!z.string().uuid().safeParse(id).success || !/^\d{4}-\d{2}$/.test(month)) return { error: "Choose a student and month." };
-  redirect(`/admin/sheets/${id}/${month}`);
-}
 
 const profileSchema = z.object({
   phone: z.string().trim().max(40).default(""),
@@ -337,4 +307,104 @@ export async function saveStudentProfileAction(studentId: string, _: ActionState
   await audit(staff._id, "admin.edit_student_profile", studentId, { fields: Object.keys(profile).filter((k) => profile[k as keyof StudentProfile]) });
   refresh();
   return { ok: true, message: "Profile saved." };
+}
+
+// ---------- Teacher assignment ----------
+
+async function activeTeacher(id: string) {
+  if (!z.string().uuid().safeParse(id).success) return null;
+  return (await cols()).staff.findOne({ _id: id, role: "TEACHER", active: true });
+}
+
+/**
+ * Puts a student on a teacher's roster (or on nobody's). Only the student's teacher changes: their
+ * attendance rows, signatures, hours and approvals are never touched. Days already approved keep
+ * the teacher who approved them; pending days simply show on the new teacher's roster, and new
+ * submissions go there too. Each change closes the previous assignment period and opens a new one,
+ * so the history of who managed the student, and when, is kept.
+ */
+async function setTeacher(student: Pick<Student, "_id" | "name"> & { teacherId?: string | null }, teacher: Pick<Staff, "_id" | "name"> | null, by: Pick<Staff, "_id" | "name">) {
+  const { students, assignments } = await cols();
+  const now = new Date();
+  await students.updateOne({ _id: student._id }, { $set: { teacherId: teacher?._id ?? null } });
+  await assignments.updateMany({ studentId: student._id, to: null }, { $set: { to: now } });
+  if (teacher) {
+    await assignments.insertOne({ _id: newId(), studentId: student._id, teacherId: teacher._id, teacherName: teacher.name, from: now, to: null, byId: by._id, byName: by.name });
+  }
+  await audit(by._id, "admin.assign_teacher", student._id, { from: student.teacherId ?? null, to: teacher?._id ?? null, toName: teacher?.name ?? null });
+}
+
+/** How many of a student's days are waiting for approval (they move to the new teacher). */
+const pendingCount = async (studentId: string) =>
+  (await cols()).entries.countDocuments({ studentId, status: "PRESENT", staffSignature: null, studentSignature: { $ne: null } });
+
+/** Admin: put one student on a teacher's roster, or change their teacher. */
+export async function assignTeacherAction(studentId: string, _: ActionState, fd: FormData): Promise<ActionState> {
+  const admin = await requireAdmin();
+  const teacherId = String(fd.get("teacherId") ?? "");
+  const { students } = await cols();
+  const student = await students.findOne({ _id: studentId });
+  if (!student) return { error: "Student not found." };
+  const teacher = teacherId ? await activeTeacher(teacherId) : null;
+  if (teacherId && !teacher) return { error: "Choose a teacher from the list." };
+  if ((student.teacherId ?? null) === (teacher?._id ?? null)) return { ok: true, message: "Nothing changed." };
+  await setTeacher(student, teacher, admin);
+  refresh();
+  const pending = await pendingCount(student._id);
+  return {
+    ok: true,
+    message: teacher
+      ? `${student.name} is now on ${teacher.name}'s roster.${pending ? ` ${pending} pending day${pending === 1 ? "" : "s"} moved with them.` : ""} Their attendance records are unchanged.`
+      : `${student.name} is no longer assigned to a teacher. Their attendance records are unchanged.`,
+  };
+}
+
+/** Admin: put many students on one teacher's roster at once (ticked on the Students page). */
+export async function bulkAssignTeacherAction(_: ActionState, fd: FormData): Promise<ActionState> {
+  const admin = await requireAdmin();
+  const ids = z.array(z.string().uuid()).min(1).max(2000).safeParse(fd.getAll("ids").map(String));
+  if (!ids.success) return { error: "Tick the students to assign first." };
+  const teacherId = String(fd.get("teacherId") ?? "");
+  const teacher = teacherId ? await activeTeacher(teacherId) : null;
+  if (teacherId && !teacher) return { error: "Choose a teacher from the list." };
+  let moved = 0;
+  for (const s of await (await cols()).students.find({ _id: { $in: ids.data } }).toArray()) {
+    if ((s.teacherId ?? null) === (teacher?._id ?? null)) continue;
+    await setTeacher(s, teacher, admin);
+    moved++;
+  }
+  refresh();
+  return { ok: true, message: moved ? `${moved} student${moved === 1 ? "" : "s"} ${teacher ? `moved to ${teacher.name}'s roster` : "unassigned"}. Attendance records are unchanged.` : "Nothing changed." };
+}
+
+// ---------- Staff details and the "Approved by" signer ----------
+
+/** Admin: a staff member's name and position, as printed on the sheet ("STAFF NAME/POSITION"). */
+export async function setStaffDetailsAction(staffId: string, _: ActionState, fd: FormData): Promise<ActionState> {
+  const admin = await requireAdmin();
+  const name = String(fd.get("name") ?? "").trim().replace(/\s+/g, " ").slice(0, 80);
+  const position = String(fd.get("position") ?? "").trim().replace(/\s+/g, " ").slice(0, 60);
+  if (name.length < 2) return { fieldErrors: { name: "Enter the name" } };
+  const res = await (await cols()).staff.updateOne({ _id: staffId }, { $set: { name, position } });
+  if (!res.matchedCount) return { error: "Account not found." };
+  await audit(admin._id, "admin.set_staff_details", staffId, { name, position });
+  refresh();
+  return { ok: true, message: "Saved. New signatures use this name and position; earlier ones keep theirs." };
+}
+
+/**
+ * Admin: choose who signs the "Approved by" section at the bottom of each month (for example Mahek).
+ * Admin accounts only. Only these accounts can sign off months.
+ */
+export async function setStaffSignsOffAction(staffId: string, _: ActionState, fd: FormData): Promise<ActionState> {
+  const admin = await requireAdmin();
+  const on = fd.get("signsOff") === "1";
+  const { staff } = await cols();
+  const s = await staff.findOne({ _id: staffId }, { projection: { role: 1, name: 1 } });
+  if (!s) return { error: "Account not found." };
+  if (on && s.role !== "ADMIN") return { error: "Only an admin account can sign the “Approved by” section." };
+  await staff.updateOne({ _id: staffId }, { $set: { signsOff: on } });
+  await audit(admin._id, on ? "admin.signs_off_on" : "admin.signs_off_off", staffId);
+  refresh();
+  return { ok: true, message: on ? `${s.name} now signs the “Approved by” section of each month.` : `${s.name} no longer signs off months.` };
 }

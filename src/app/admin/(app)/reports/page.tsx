@@ -3,7 +3,7 @@ import { requireAdmin } from "@/lib/auth";
 import { studentScope } from "@/lib/access";
 import { courseNames, thisMonth } from "@/lib/data";
 import { thresholds } from "@/lib/policy";
-import { MONTH_RE, hoursText, monthTitle, shiftMonth } from "@/lib/sheet";
+import { MONTH_RE, monthTitle, shiftMonth } from "@/lib/sheet";
 import { classMonth } from "@/lib/classreport";
 
 export const dynamic = "force-dynamic";
@@ -45,7 +45,7 @@ export default async function Reports({ searchParams }: { searchParams: Promise<
       </p>
       <div style={{ overflowX: "auto" }}>
         <table className="tbl">
-          <thead><tr><th>Student</th><th>Class</th><th>Status</th><th>Attendance</th><th>Present</th><th>Absent</th><th>Excused</th><th>Hours</th><th>Approved</th><th></th></tr></thead>
+          <thead><tr><th>Student</th><th>Class</th><th>Status</th><th>Attendance</th><th>Present</th><th>Absent</th><th>Excused</th><th>Signed off</th><th></th></tr></thead>
           <tbody>
             {rows.map((r) => (
               <tr key={r.id}>
@@ -56,12 +56,11 @@ export default async function Reports({ searchParams }: { searchParams: Promise<
                 <td>{r.summary.present}</td>
                 <td>{r.summary.absent + r.summary.missing}</td>
                 <td>{r.summary.excused}</td>
-                <td>{hoursText(r.summary.minutes) || "0"}</td>
                 <td>{r.approved === "current" ? <span className="tag ok">yes</span> : r.approved === "outdated" ? <span className="tag warn">changed since</span> : <span className="muted">–</span>}</td>
-                <td className="small"><Link href={`/admin/sheets/${r.id}/${month}`}>Sheet</Link> · <a href={`/api/report/${r.id}?month=${month}&format=pdf`}>PDF</a></td>
+                <td className="small"><Link href={`/admin/students/${r.id}?month=${month}#records`}>Sheet</Link> · <a href={`/api/report/${r.id}?month=${month}&format=pdf`}>PDF</a></td>
               </tr>
             ))}
-            {rows.length === 0 && <tr><td colSpan={10} className="muted">Nobody had class days in {monthTitle(month)}.</td></tr>}
+            {rows.length === 0 && <tr><td colSpan={9} className="muted">Nobody had class days in {monthTitle(month)}.</td></tr>}
           </tbody>
         </table>
       </div>

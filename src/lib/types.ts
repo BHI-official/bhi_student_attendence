@@ -8,11 +8,16 @@ export type Staff = {
   email: string;
   position: string; // e.g. "Asst. Director", printed on "Approved by"
   role: Role;
-  /** Teachers see only students of these courses (by course name). Admins see everyone. */
-  courses: string[];
+  /** Old: course-based access. No longer used (teachers see the students assigned to them). */
+  courses?: string[];
   passwordHash: string;
-  /** The handwritten signature on file, used to sign rows (teachers) and month approvals (admins). */
-  signatureId: string | null;
+  /** Old: a signature on file. No longer used: everyone signs by hand each time. */
+  signatureId?: string | null;
+  /**
+   * This admin signs the "Approved by" section at the bottom of each student's month (for example
+   * Mahek). Only accounts with this set can sign off months; name and position come from the account.
+   */
+  signsOff?: boolean;
   active: boolean;
   createdAt: Date;
 };
@@ -39,8 +44,10 @@ export type Student = {
    * null for students whose PIN was set before PINs were made unique (give them a new PIN).
    */
   pinKey?: string | null;
-  /** The student's handwritten signature on file, applied to each day they fill out. */
-  signatureId: string | null;
+  /** Old: a signature on file. No longer used: every attendance day gets a new handwritten signature. */
+  signatureId?: string | null;
+  /** The one teacher who manages this student's attendance (their roster). null = not assigned yet. */
+  teacherId?: string | null;
   courseName: string;
   courseCode: string;
   courseDuration: string;
@@ -48,7 +55,7 @@ export type Student = {
   instructor: string;
   startDate: string; // YYYY-MM-DD
   endDate: string;
-  /** Class weekdays, 1 = Monday ... 7 = Sunday. */
+  /** Class weekdays, 1 = Monday ... 5 = Friday (weeks run Monday to Friday). */
   classDays: number[];
   profile?: StudentProfile;
   active: boolean;
@@ -119,6 +126,9 @@ export type Entry = {
    */
   startInkId?: string | null;
   endInkId?: string | null;
+  /** Lunch break start and end, written by hand by the student (images, like the other times). */
+  lunchStartInkId?: string | null;
+  lunchEndInkId?: string | null;
   /**
    * How many minutes before saving the typed time was (0 = typed "now"). Lets staff see rows
    * entered after the fact. null when staff wrote the time, or for rows from before typed times.
@@ -131,8 +141,19 @@ export type Entry = {
    */
   filledLaterAt?: Date | null;
   minutes: number | null;
+  /** The student's handwritten signature for this one day. A new one every day. */
   studentSignature: Signature | null;
+  /** The teacher's (or admin's) handwritten signature: the day is Approved. */
   staffSignature: StaffSignature | null;
+  /** The teacher sent the submission back: "Needs correction". Cleared when the student submits again. */
+  correction?: { byId: string; byName: string; at: Date; reason: string } | null;
+  /**
+   * The teacher marked the student present or absent while taking attendance. Marking present is
+   * not approving: without the student's signature the day stays "signature missing".
+   */
+  markedBy?: { staffId: string; staffName: string; at: Date; mark: "PRESENT" | "ABSENT" } | null;
+  /** A document the student uploaded for an absence. Only an approved excuse makes the day Excused. */
+  excuse?: Excuse | null;
   note: string;
   history: Change[];
   /** Comments from staff (and the student on their own day). Older rows have none. */
@@ -141,6 +162,38 @@ export type Entry = {
 };
 
 export type Holiday = { _id: string /* date */; name: string; /** Optional note shown with the holiday. */ note?: string };
+
+export type ExcuseStatus = "PENDING" | "APPROVED" | "REJECTED";
+export type Excuse = {
+  fileId: string;
+  fileName: string;
+  mime: string;
+  size: number;
+  note: string;
+  at: Date;
+  status: ExcuseStatus;
+  decidedBy?: { id: string; name: string; role: Role } | null;
+  decidedAt?: Date | null;
+  reason?: string;
+};
+
+/** The uploaded excuse document itself (PDF, JPG or PNG). Never deleted; rows point at it. */
+export type ExcuseFile = { _id: string; studentId: string; date: string; name: string; mime: string; size: number; data: import("mongodb").Binary; at: Date };
+
+/**
+ * One period of a student being assigned to a teacher. A reassignment closes the open period and
+ * opens a new one, so admins can see who managed the student when. Attendance rows are never touched.
+ */
+export type TeacherAssignment = {
+  _id: string;
+  studentId: string;
+  teacherId: string | null;
+  teacherName: string;
+  from: Date;
+  to: Date | null;
+  byId: string;
+  byName: string;
+};
 
 /** "Approved by" block at the bottom of a month. _id = `${studentId}:${month}`. */
 export type MonthApproval = {

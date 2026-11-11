@@ -319,7 +319,7 @@ export function InkField({ name, kind = "signature", label, title, hint, value, 
         {v ? <img src={v.png} alt="" /> : <span>{emptyText ?? (kind === "signature" ? "Tap to sign" : "Tap to write")}</span>}
       </button>
       {v && !disabled && (
-        <button type="button" className="linkbtn small" onClick={() => set(null)}>Clear {what}</button>
+        <button type="button" className="linkbtn small" onClick={() => set(null)}>{kind === "time" ? "Clear" : `Clear ${what}`}</button>
       )}
       {name && <input type="hidden" name={name} value={v?.png ?? ""} />}
       {open && (

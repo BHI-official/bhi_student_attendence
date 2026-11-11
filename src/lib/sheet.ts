@@ -109,8 +109,10 @@ export const monthMinutes = (entries: Entry[]) =>
 export type StudentInput = {
   name: string; courseName: string; courseCode: string; courseDuration: string; caseManager: string; instructor: string;
   startDate: string; endDate: string; pin: string;
+  /** Optional: email of the teacher whose roster the student goes on. */
+  teacherEmail: string;
 };
-export const CSV_COLUMNS = ["name", "courseName", "courseCode", "courseDuration", "caseManager", "instructor", "startDate", "endDate", "pin"] as const;
+export const CSV_COLUMNS = ["name", "courseName", "courseCode", "courseDuration", "caseManager", "instructor", "startDate", "endDate", "pin", "teacherEmail"] as const;
 
 /** Accepts 09/01/2026, 9/1/2026 or 2026-09-01. */
 export function parseDate(v: string) {
@@ -155,7 +157,7 @@ export function parseStudentsCsv(text: string): { students: StudentInput[]; erro
   if (!rows.length) return { students: [], errors: ["The file is empty."] };
   const header = rows[0].map((h) => h.trim());
   const col = (name: string) => header.findIndex((h) => h.toLowerCase() === name.toLowerCase());
-  const missing = CSV_COLUMNS.filter((c) => c !== "pin" && col(c) < 0);
+  const missing = CSV_COLUMNS.filter((c) => c !== "pin" && c !== "teacherEmail" && col(c) < 0);
   if (missing.length) return { students: [], errors: [`Missing columns: ${missing.join(", ")}. The first row must name the columns.`] };
   const students: StudentInput[] = [];
   rows.slice(1).forEach((r, i) => {
@@ -171,7 +173,7 @@ export function parseStudentsCsv(text: string): { students: StudentInput[]; erro
     if (pin && !/^\d{4,6}$/.test(pin)) return errors.push(`Line ${line} (${name}): PIN must be 4 to 6 digits.`);
     students.push({
       name, courseName: get("courseName"), courseCode: get("courseCode"), courseDuration: get("courseDuration"),
-      caseManager: get("caseManager"), instructor: get("instructor"), startDate, endDate, pin,
+      caseManager: get("caseManager"), instructor: get("instructor"), startDate, endDate, pin, teacherEmail: get("teacherEmail").toLowerCase(),
     });
   });
   return { students, errors };

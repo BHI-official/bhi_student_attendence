@@ -21,7 +21,6 @@ export async function GET(req: Request) {
   const course = (q.get("course") ?? "").slice(0, 120);
   const type = q.get("type") === "sheets" ? "sheets" : "summary";
   if (!MONTH_RE.test(month) || month > thisMonth()) return new Response("Choose a month.", { status: 400 });
-  if (course && staff.role !== "ADMIN" && !staff.courses.includes(course)) return new Response("Not found", { status: 404 });
 
   const rows = await classMonth(studentScope(staff), month, course || undefined);
   let body: Uint8Array;

@@ -23,6 +23,9 @@ async function main() {
   await idx("students", { nameLower: 1 });
   await idx("students", { active: 1, endDate: 1 });
   await idx("students", { courseName: 1 });
+  await idx("students", { teacherId: 1, nameLower: 1 });
+  await idx("teacher_assignments", { studentId: 1, from: -1 });
+  await idx("excuse_files", { studentId: 1, date: 1 });
   // Two active students can never share a PIN (students whose PIN predates this have no pinKey).
   await idx("students", { pinKey: 1 }, { unique: true, name: "unique_active_pin", partialFilterExpression: { active: true, pinKey: { $type: "string" } } });
   await idx("entries", { studentId: 1, date: 1 });
@@ -37,6 +40,43 @@ async function main() {
   if (oldPins) console.log(`${oldPins} active student(s) have a PIN from before PINs were unique. Give them a new PIN (student profile → PIN) to be sure it's theirs alone.`);
 
   const staff = db.collection("staff");
+
+  // Upgrade: teachers used to see students by course. Each student now has one teacher (their
+  // roster). Students without one are put on the roster of the teacher who had their course, when
+  // exactly one active teacher did. Attendance rows are not touched.
+  const students = db.collection("students");
+  const teachers = await staff.find({ role: "TEACHER", active: true }).toArray();
+  const unassigned = await students.find({ active: true, $or: [{ teacherId: null }, { teacherId: { $exists: false } }] }).toArray();
+  let moved = 0;
+  const unclear: string[] = [];
+  for (const st of unassigned) {
+    const match = teachers.filter((t) => Array.isArray(t.courses) && t.courses.includes(st.courseName));
+    if (match.length !== 1) { unclear.push(`${st.name} (${st.courseName || "no course"}: ${match.length ? `${match.length} teachers` : "no teacher"})`); continue; }
+    const now = new Date();
+    await students.updateOne({ _id: st._id }, { $set: { teacherId: match[0]._id } });
+    await db.collection("teacher_assignments").insertOne({
+      _id: randomUUID() as never, studentId: st._id, teacherId: match[0]._id, teacherName: match[0].name, from: now, to: null, byId: "setup", byName: "Setup (from course)",
+    });
+    moved++;
+  }
+  if (moved) console.log(`${moved} student(s) put on their course teacher's roster.`);
+  if (unclear.length) console.log(`${unclear.length} student(s) need a teacher (Admin → Students & teachers):\n  ${unclear.slice(0, 20).join("\n  ")}${unclear.length > 20 ? "\n  …" : ""}`);
+
+  // The "Approved by" section at the bottom of each month is signed by one chosen admin (Mahek).
+  // If nobody is chosen yet and an active admin named Mahek exists, she is chosen.
+  if (!(await staff.countDocuments({ role: "ADMIN", active: true, signsOff: true }))) {
+    const mahek = await staff.find({ role: "ADMIN", active: true, name: { $regex: "mahek", $options: "i" } }).toArray();
+    if (mahek.length === 1) {
+      await staff.updateOne({ _id: mahek[0]._id }, { $set: { signsOff: true } });
+      console.log(`${mahek[0].name} now signs the "Approved by" section of each month.`);
+    } else {
+      console.log(`Nobody signs the "Approved by" section yet: Admin → Staff → choose the admin → "Signs the Approved by section".`);
+    }
+  }
+  const signerIds = (await staff.find({ signsOff: true, active: true }).toArray()).map((x) => x._id);
+  const other = await db.collection("month_approvals").countDocuments({ staffId: { $nin: signerIds } });
+  if (other) console.log(`${other} month sign-off(s) were signed by someone else. They show "Needs your signature" on Admin → Monthly sign-off for the signer to sign again.`);
+
   if (await staff.countDocuments({ role: "ADMIN", active: true })) {
     console.log("An admin account already exists. Nothing else to do.");
   } else {
@@ -47,8 +87,8 @@ async function main() {
     rl.close();
     if (name.length < 2 || !email.includes("@") || password.length < 10) throw new Error("Name, a valid email and a 10+ character password are required.");
     await staff.insertOne({
-      _id: randomUUID() as never, name, email, position: "Admin", role: "ADMIN", courses: [], passwordHash: await bcrypt.hash(password, 12),
-      signatureId: null, active: true, createdAt: new Date(),
+      _id: randomUUID() as never, name, email, position: "Admin", role: "ADMIN", passwordHash: await bcrypt.hash(password, 12),
+      active: true, createdAt: new Date(),
     });
     console.log(`Admin created: ${email}. Sign in at /admin/login.`);
   }

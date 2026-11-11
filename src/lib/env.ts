@@ -5,12 +5,9 @@ const schema = z.object({
   MONGODB_DB: z.string().optional(),
   SESSION_SECRET: z.string().min(32, "SESSION_SECRET must be at least 32 characters"),
   APP_TIMEZONE: z.string().default("America/New_York"),
-  /** Typed times: how many minutes back a student may enter a time, and the shortest/longest day. */
-  TIME_ENTRY_WINDOW_MINUTES: z.coerce.number().int().min(0).max(120).default(15),
+  /** The shortest and longest day a student can record. */
   MIN_CLASS_MINUTES: z.coerce.number().int().min(1).max(240).default(5),
   MAX_CLASS_MINUTES: z.coerce.number().int().min(60).max(1440).default(720),
-  /** Rows can be changed by teachers for this many days after the class day; after that only admins. */
-  EDIT_WINDOW_DAYS: z.coerce.number().int().min(0).max(60).default(7),
   /** Attendance colours on the profile: at or above GOOD is green, at or above ATTENTION is orange, below is red. */
   ATTENDANCE_GOOD_PERCENT: z.coerce.number().min(1).max(100).default(90),
   ATTENDANCE_ATTENTION_PERCENT: z.coerce.number().min(0).max(100).default(75),
