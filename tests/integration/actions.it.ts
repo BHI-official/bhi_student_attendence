@@ -432,24 +432,36 @@ test("admin corrects any day, including old ones; the original is kept and the s
 
   await asStaff(ids.admin);
   // Add a missing old day.
-  let r = await S.adminEditRowAction(alex._id, oldDay, {}, fd({ status: "PRESENT", startTime: "09:00", endTime: "13:00", reason: "" }));
+  // Times are written by hand by the admin too, never typed.
+  let r = await S.adminEditRowAction(alex._id, oldDay, {}, fd({ status: "PRESENT", startInk: SIG, endInk: SIG, reason: "" }));
   assert.ok(r.ok, JSON.stringify(r));
   assert.match(r.message, /signature stays missing/);
   let e: any = await entry(alex._id, oldDay);
-  assert.equal(e.startTime, "09:00");
+  assert.ok(e.startInkId && e.endInkId, "the admin's handwriting is on the day");
+  assert.equal((await db.collection("signatures").findOne({ _id: e.startInkId }) as any).ownerType, "STAFF", "saved as the admin's handwriting, not the student's");
+  assert.equal(e.startTime, null);
   assert.equal(e.minutes, null);
+  assert.equal(e.studentSignature, null);
   assert.equal(e.studentSignature, null);
   assert.equal(week.dayStatus(e, false, oldDay, today), "MISSING");
 
   // Correct an approved day: a reason is required, the approval comes off, the original is recorded.
   const key = `${alex._id}:${lastMon}`;
   const before: any = await entry(alex._id, lastMon);
-  assert.ok((await S.adminEditRowAction(alex._id, lastMon, {}, fd({ status: "PRESENT", startTime: "09:00", endTime: "12:00" }))).fieldErrors?.reason);
-  r = await S.adminEditRowAction(alex._id, lastMon, {}, fd({ status: "PRESENT", startTime: "09:00", endTime: "12:00", reason: "Left early, confirmed by teacher" }));
+  assert.ok((await S.adminEditRowAction(alex._id, lastMon, {}, fd({ status: "PRESENT", endInk: SIG }))).fieldErrors?.reason);
+  // Only the end time is rewritten; the other three handwritten times stay the student's.
+  r = await S.adminEditRowAction(alex._id, lastMon, {}, fd({ status: "PRESENT", endInk: SIG, reason: "Left early, confirmed by teacher" }));
   assert.ok(r.ok);
   e = await entry(alex._id, lastMon);
-  assert.equal(e.endTime, "12:00");
-  assert.equal(e.endInkId, null, "the corrected time replaces the handwritten one on the sheet");
+  assert.notEqual(e.endInkId, before.endInkId, "the admin's handwritten end time replaces the old one");
+  assert.equal(e.startInkId, before.startInkId, "boxes left empty keep the student's own handwriting");
+  assert.equal(e.lunchStartInkId, before.lunchStartInkId);
+  assert.match(e.history.at(-1).what, /rewrote by hand: end time/);
+  // The student can see the admin's rewritten time on their own sheet.
+  const inkRoute = await import("../../src/app/api/ink/[id]/route");
+  await asStudent(alex._id);
+  assert.equal((await inkRoute.GET(new Request("http://x"), { params: Promise.resolve({ id: e.endInkId }) })).status, 200);
+  await asStaff(ids.admin);
   assert.equal(e.staffSignature, null);
   assert.equal(e.studentSignature.id, before.studentSignature.id, "the student's own signature is kept, untouched");
   assert.match(e.history.at(-1).what, /^admin: .*approval by Dr\. Saniya removed/);

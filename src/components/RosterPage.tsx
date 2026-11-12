@@ -7,6 +7,7 @@ import { isWeekday, mondayOf, openFrom, weekTitle } from "@/lib/week";
 import { AutoRefresh } from "./Idle";
 import { Roster } from "./Roster";
 import { MonthGrid } from "./MonthGrid";
+import { thresholds } from "@/lib/policy";
 
 export type RosterParams = { view?: string; date?: string; teacher?: string; program?: string };
 
@@ -93,6 +94,12 @@ export async function RosterPage({ staff, sp, base }: { staff: Staff; sp: Roster
           </form>
         )}
       </nav>
+      <p className="legend small levels-legend">
+        Attendance so far:
+        <span className="level sm good">{thresholds().goodPercent}% or more</span>
+        <span className="level sm attention">{thresholds().attentionPercent}–{thresholds().goodPercent - 1}%</span>
+        <span className="level sm poor">under {thresholds().attentionPercent}%</span>
+      </p>
       {!isAdmin && from < oldest && <p className="msg info">Days before {usDate(oldest)} are locked for changes. You can still approve or send back days that are waiting for you. Ask an admin to correct anything else.</p>}
 
       {studentCount === 0 ? (

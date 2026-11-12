@@ -8,11 +8,11 @@ import { z } from "zod";
 import { audit, cols, newId, rateLimit, type Entry, type EntryStatus, type Excuse, type RowComment, type Staff } from "@/lib/db";
 import { PORTAL, endStaffSession, requireStaff, startStaffSession } from "@/lib/auth";
 import { holidaysBetween, thisMonth, today } from "@/lib/data";
-import { DATE_RE, MONTH_RE, addDays, isClassDay, minutesBetween, monthTitle, parseTime, time12, usDate } from "@/lib/sheet";
+import { DATE_RE, MONTH_RE, addDays, isClassDay, monthTitle, usDate } from "@/lib/sheet";
 import { entriesHash } from "@/lib/hash";
 import { canSee } from "@/lib/access";
 import { loadRoster } from "@/lib/roster";
-import { checkSignaturePng, saveSignature } from "@/lib/signatures";
+import { checkSignaturePng, checkTimePng, saveSignature } from "@/lib/signatures";
 import { EXCUSE_MAX_BYTES, STATUS_LABEL, dayStatus, isWeekday, safeFileName, sniffExcuse, teacherLock } from "@/lib/week";
 import type { ActionState } from "@/lib/action";
 
@@ -403,17 +403,23 @@ export async function adminEditRowAction(studentId: string, date: string, _: Act
   if (date > today()) return { error: "You can't record a future date." };
   const status = z.enum(["PRESENT", "ABSENT", "EXCUSED", "HOLIDAY"]).safeParse(fd.get("status"));
   if (!status.success) return { fieldErrors: { status: "Choose a status" } };
-  const rawStart = String(fd.get("startTime") ?? "").trim(), rawEnd = String(fd.get("endTime") ?? "").trim();
   const note = String(fd.get("note") ?? "").trim().slice(0, 200);
   const reason = String(fd.get("reason") ?? "").trim().slice(0, 300);
   const present = status.data === "PRESENT";
-  let startTime: string | null = null, endTime: string | null = null;
-  if (present && (rawStart || rawEnd)) {
-    startTime = parseTime(rawStart); endTime = parseTime(rawEnd);
-    if (!startTime) return { fieldErrors: { startTime: "Enter the start time" } };
-    if (!endTime) return { fieldErrors: { endTime: "Enter the end time" } };
-    if (minutesBetween(startTime, endTime) === null) return { fieldErrors: { endTime: "End must be after start" } };
+  // Corrected times are written by hand, like everything else on the sheet. Each box the admin writes
+  // in replaces that one time; a box left empty keeps what is there. Nothing is typed.
+  const INK = [["startInk", "startInkId", "start time"], ["lunchStartInk", "lunchStartInkId", "lunch out"], ["lunchEndInk", "lunchEndInkId", "lunch in"], ["endInk", "endInkId", "end time"]] as const;
+  const inks: { field: (typeof INK)[number][1]; label: string; png: string }[] = [];
+  const inkErrors: Record<string, string> = {};
+  if (present) {
+    for (const [name, field, label] of INK) {
+      const raw = String(fd.get(name) ?? "");
+      if (!raw) continue;
+      const r = checkTimePng(raw);
+      if ("error" in r) inkErrors[name] = r.error; else inks.push({ field, label, png: r.png });
+    }
   }
+  if (Object.keys(inkErrors).length) return { fieldErrors: inkErrors };
   // An optional document (an excuse for an older date, a note handed in on paper).
   const file = fd.get("file");
   let upload: { buf: Uint8Array; mime: NonNullable<ReturnType<typeof sniffExcuse>>; name: string } | null = null;
@@ -431,9 +437,7 @@ export async function adminEditRowAction(studentId: string, date: string, _: Act
   if (date < student.startDate || date > student.endDate) return { error: `${usDate(date)} is outside ${student.name}'s course dates.` };
   const id = `${studentId}:${date}`;
   const before = await col.findOne({ _id: id });
-  const keepTimes = present && !rawStart && !rawEnd && before?.status === "PRESENT";
-  if (keepTimes) { startTime = before!.startTime; endTime = before!.endTime; }
-  const changed = !before || before.status !== status.data || before.startTime !== startTime || before.endTime !== endTime || (before.note ?? "") !== note || !!upload;
+  const changed = !before || before.status !== status.data || inks.length > 0 || (before.note ?? "") !== note || !!upload;
   if (!changed) return { ok: true, message: "Nothing changed." };
   if (before && reason.length < 3) return { fieldErrors: { reason: "Say why you're changing this day" } };
   const now = new Date();
@@ -449,23 +453,31 @@ export async function adminEditRowAction(studentId: string, date: string, _: Act
   } else if (status.data === "EXCUSED" && before?.excuse && before.excuse.status !== "APPROVED") {
     excuse = { ...before.excuse, status: "APPROVED", decidedBy: { id: staff._id, name: staff.name, role: staff.role }, decidedAt: now };
   }
-  const describe = (e: Pick<Entry, "status" | "startTime" | "endTime"> | null) =>
-    e ? `${STATUS_LABEL[e.status === "PRESENT" ? "PENDING" : e.status].replace("Pending", "Present")}${e.status === "PRESENT" && e.startTime ? ` ${time12(e.startTime)}–${time12(e.endTime)}` : ""}` : "nothing recorded";
-  const after = { status: status.data, startTime: present ? startTime : null, endTime: present ? endTime : null, minutes: null, note };
-  const timesChanged = before?.startTime !== after.startTime || before?.endTime !== after.endTime;
-  const what = `admin: ${describe(before)} → ${describe(after)}${before?.staffSignature ? ` (approval by ${before.staffSignature.staffName} removed)` : ""}${upload ? `; document ${upload.name}` : ""}`;
+  const word = (st: EntryStatus) => (st === "PRESENT" ? "Present" : STATUS_LABEL[st]);
+  // The admin's handwriting, saved as the admin's (the student's own stays in the history and audit log).
+  const newInk: Record<string, string> = {};
+  for (const i of inks) newInk[i.field] = await saveSignature("STAFF", staff._id, i.png, "DRAWN", staff._id, "TIME");
+  // The earlier handwriting stays in the audit log (with its image), so the history line stays readable.
+  const replaced = inks.map((i) => i.label);
+  const after = { status: status.data, minutes: null, note, ...(present ? {} : { startTime: null, endTime: null }) };
+  const what = `admin: ${before ? word(before.status) : "nothing recorded"} → ${word(status.data)}`
+    + (replaced.length ? `; rewrote by hand: ${replaced.join(", ")} (the earlier handwriting is kept)` : "")
+    + (before?.staffSignature ? ` (approval by ${before.staffSignature.staffName} removed)` : "") + (upload ? `; document ${upload.name}` : "");
+  const setFields: Record<string, unknown> = {
+    ...after, staffSignature: null, correction: null, updatedAt: now,
+    // Each rewritten time replaces the old one (a typed time from earlier is dropped with it).
+    ...newInk,
+    ...(newInk.startInkId ? { startTime: null } : {}), ...(newInk.endInkId ? { endTime: null } : {}),
+    ...(excuse !== undefined ? { excuse } : {}),
+  };
+  const onInsert: Record<string, unknown> = {
+    studentId, date, startAt: null, endAt: null, studentSignature: null, markedBy: null, comments: [], excuse: null,
+    startTime: null, endTime: null, startInkId: null, endInkId: null, lunchStartInkId: null, lunchEndInkId: null,
+  };
+  for (const k of Object.keys(setFields)) delete onInsert[k];
   await col.updateOne(
     { _id: id },
-    {
-      $set: {
-        ...after, staffSignature: null, correction: null, updatedAt: now,
-        // The student's handwritten time no longer matches a corrected time, so the corrected one shows.
-        ...(timesChanged ? { startInkId: null, endInkId: null, lunchStartInkId: null, lunchEndInkId: null } : {}),
-        ...(excuse !== undefined ? { excuse } : {}),
-      },
-      $setOnInsert: { studentId, date, startAt: null, endAt: null, studentSignature: null, markedBy: null, comments: [], ...(excuse === undefined ? { excuse: null } : {}) },
-      $push: { history: { at: now, byId: staff._id, byName: staff.name, what, reason: reason || "added by admin" } },
-    },
+    { $set: setFields, $setOnInsert: onInsert, $push: { history: { at: now, byId: staff._id, byName: staff.name, what, reason: reason || "added by admin" } } },
     { upsert: true },
   );
   await audit(staff._id, before ? "admin.edit_day" : "admin.add_day", id, {
@@ -474,7 +486,7 @@ export async function adminEditRowAction(studentId: string, date: string, _: Act
       status: before.status, startTime: before.startTime, endTime: before.endTime, minutes: before.minutes, note: before.note,
       startInkId: before.startInkId ?? null, endInkId: before.endInkId ?? null, lunchStartInkId: before.lunchStartInkId ?? null, lunchEndInkId: before.lunchEndInkId ?? null, staffSignature: before.staffSignature ?? null, excuse: before.excuse ? { ...before.excuse } : null,
     } : null,
-    after, document: upload?.name ?? null,
+    after: { ...after, rewrote: newInk }, document: upload?.name ?? null,
   });
   refresh();
   return { ok: true, message: `${student.name}, ${usDate(date)} saved.${present && !before?.studentSignature ? " The student's signature stays missing until they sign." : ""}` };

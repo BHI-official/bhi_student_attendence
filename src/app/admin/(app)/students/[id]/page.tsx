@@ -143,7 +143,8 @@ export default async function StudentProfilePage({ params, searchParams }: { par
             </p>
           )}
           <AdminDayEditor key={editDay} studentId={s._id} initial={{
-            date: editDay, status: editing?.status ?? "PRESENT", start: editing?.startTime ?? "", end: editing?.endTime ?? "", note: editing?.note ?? "",
+            date: editDay, status: editing?.status ?? "PRESENT", note: editing?.note ?? "",
+            times: editing?.status === "PRESENT" ? dayTimes(editing) : [],
             exists: !!editing, hasStudentSignature: !!editing?.studentSignature,
           }} />
           {editing && (

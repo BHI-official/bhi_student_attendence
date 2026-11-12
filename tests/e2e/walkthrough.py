@@ -94,6 +94,8 @@ with sync_playwright() as p:
     # ---- Teacher: roster
     staff_login(page, "teacher", "saniya@bhi.test"); step("teacher signs in")
     expect(page.locator("#take-h")).to_contain_text("Take attendance"); step("teacher lands on today's Take attendance")
+    expect(page.locator(".take-btn .level").first).to_be_visible()
+    expect(page.locator(".levels-legend")).to_contain_text("90% or more"); step("teacher sees green/yellow/red next to each name")
     # Take attendance for last Thursday: tap Maria absent, sign once.
     page.goto(B + f"/teacher?view=day&date={D(3).isoformat()}")
     take = page.locator("section.take")
@@ -170,9 +172,17 @@ with sync_playwright() as p:
     expect(page.locator("details", has_text="Assignment history")).to_contain_text("Omar Haddad")
     old = mon - datetime.timedelta(days=3)
     page.fill("#pick-day", old.isoformat()); page.click("text=Open day")
-    page.fill("#ed-start", "09:00"); page.fill("#ed-end", "12:00"); page.fill("#ed-reason", "Signed paper sheet, confirmed")
+    # The admin writes the corrected end time by hand (no typed times).
+    page.wait_for_url("**day=**"); page.wait_for_load_state("networkidle")
+    ed = page.locator(".editpanel")
+    expect(ed.locator("input[type=time]")).to_have_count(0)
+    ed.locator(".timecell", has_text="End time").locator(".inkbubble").click()
+    page.locator(".inkmodal canvas").wait_for(); draw(page)
+    page.locator(".inkmodal").get_by_role("button", name="Done", exact=True).click()
+    page.fill("#ed-reason", "Signed paper sheet, confirmed")
     page.locator(".editpanel").get_by_role("button", name=re.compile(r"^Save (day|correction)$")).click()
-    expect(page.locator(".editpanel .msg.ok")).to_contain_text("saved"); step("admin corrects an old day")
+    expect(page.locator(".editpanel .msg.ok")).to_contain_text("saved"); step("admin corrects an old day, writing the time by hand")
+    page.screenshot(path="/tmp/shots/17-admin-handwritten-correction.png", full_page=False)
     page.screenshot(path="/tmp/shots/09-admin-profile.png", full_page=True)
     # Mahek signs the "Approved by" at the bottom of the month, for everyone who is ready, by hand.
     page.goto(B + "/admin/sign-off")  # opens on last month

@@ -5,6 +5,7 @@ import { holidaysBetween, today } from "./data";
 import { addDays, isClassDay, time12 } from "./sheet";
 import { dayStatus, isWeekday, teacherLock, type DayStatus } from "./week";
 import type { ExcuseStatus } from "./types";
+import { summaries } from "./summary";
 
 /** One student on one day, as the roster shows it. Plain data, safe to send to the browser. */
 export type RosterRow = {
@@ -35,6 +36,9 @@ export type RosterRow = {
   edited: boolean;
   /** The admin who signed off this month ("Approved by"); the day is then closed for teachers. */
   signedOffBy: string | null;
+  /** The student's attendance over the course so far: green / yellow / red, and the percentage. */
+  level: "good" | "attention" | "poor" | "none";
+  rate: number | null;
 };
 
 export function toRow(
@@ -66,6 +70,8 @@ export function toRow(
     locked: isAdmin ? null : signedOffBy ? `Signed off by ${signedOffBy}` : teacherLock(date, now),
     edited: !!e?.history?.some((h) => h.reason && h.what.startsWith("admin:")),
     signedOffBy,
+    level: "none",
+    rate: null,
   };
 }
 
@@ -108,12 +114,16 @@ export async function loadRoster(staff: Staff, q: RosterQuery) {
   const byKey = new Map(rows.map((e) => [e._id, e]));
   const teacherName = new Map(teachers.map((t) => [t._id, t.name]));
   const now = today();
+  const sums = await summaries(list);
   const out: RosterRow[] = [];
   for (let d = q.from; d <= q.to; d = addDays(d, 1)) {
     if (!isWeekday(d)) continue;
     for (const s of list) {
       if (!isClassDay(s, d)) continue;
-      out.push(toRow(s, s.teacherId ? teacherName.get(s.teacherId) ?? "" : "", d, byKey.get(`${s._id}:${d}`) ?? null, holidays.has(d), now, isAdmin, signed.get(`${s._id}:${d.slice(0, 7)}`) ?? null));
+      const row = toRow(s, s.teacherId ? teacherName.get(s.teacherId) ?? "" : "", d, byKey.get(`${s._id}:${d}`) ?? null, holidays.has(d), now, isAdmin, signed.get(`${s._id}:${d.slice(0, 7)}`) ?? null);
+      const sum = sums.get(s._id);
+      if (sum) { row.level = sum.level; row.rate = sum.rate; }
+      out.push(row);
     }
   }
   const programs = [...new Set(list.map((s) => s.courseName).filter(Boolean))].sort();

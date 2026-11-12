@@ -11,6 +11,7 @@ import { approveRowsAction, decideExcuseAction, markRowsAction, rejectRowAction 
 import { InkPad } from "./Ink";
 import { HandTimes } from "./HandTimes";
 import { TakeAttendance } from "./TakeAttendance";
+import { LevelDot } from "./LevelDot";
 import { Msg } from "./forms";
 
 type Filter = "action" | "all" | "MISSING" | "PENDING" | "NEEDS_CORRECTION" | "EXCUSE" | "APPROVED" | "ABSENT" | "LATE";
@@ -185,6 +186,7 @@ function RowView({ r, grouped, isAdmin, picked, onPick, pending, open, setOpen, 
         <td className="pick"><input type="checkbox" className="chk" checked={picked} onChange={onPick} aria-label={`Select ${r.name}, ${usDate(r.date)}`} disabled={r.status === "HOLIDAY"} /></td>
         <td className="who">
           <strong>{isAdmin ? <Link href={`/admin/students/${r.studentId}`}>{r.name}</Link> : r.name}</strong>
+          <LevelDot level={r.level} rate={r.rate} />
           <span className="small muted">{r.program}{isAdmin && <> · {r.teacherName || <em>no teacher</em>}</>}</span>
         </td>
         {!grouped && <td className="nowrap">{usDate(r.date)}</td>}

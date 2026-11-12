@@ -3,9 +3,17 @@
 import { useActionState, useState } from "react";
 import type { ActionState } from "@/lib/action";
 import { adminEditRowAction } from "@/actions/staff";
+import { InkField, type InkValue } from "./Ink";
+import { HandTimes } from "./HandTimes";
 import { Msg } from "./forms";
 
-export type DayValues = { date: string; status: "PRESENT" | "ABSENT" | "EXCUSED" | "HOLIDAY"; start: string; end: string; note: string; exists: boolean; hasStudentSignature: boolean };
+export type DayValues = {
+  date: string; status: "PRESENT" | "ABSENT" | "EXCUSED" | "HOLIDAY"; note: string; exists: boolean; hasStudentSignature: boolean;
+  /** The times on the day now (handwriting), shown above the boxes. */
+  times: { label: string; ink: string | null; typed: string }[];
+};
+
+const BOXES = [["startInk", "Start time"], ["lunchStartInk", "Lunch out"], ["lunchEndInk", "Lunch in"], ["endInk", "End time"]] as const;
 
 /**
  * An admin adds or corrects one day. A reason is required to change a day that already has
@@ -13,6 +21,7 @@ export type DayValues = { date: string; status: "PRESENT" | "ABSENT" | "EXCUSED"
  */
 export function AdminDayEditor({ studentId, initial }: { studentId: string; initial: DayValues }) {
   const [status, setStatus] = useState(initial.status);
+  const [ink, setInk] = useState<Record<string, InkValue>>({});
   const [state, run, pending] = useActionState<ActionState, FormData>((prev, fd) => adminEditRowAction(studentId, String(fd.get("date") ?? ""), prev, fd), {});
   const fe = state.fieldErrors ?? {};
   return (
@@ -29,21 +38,22 @@ export function AdminDayEditor({ studentId, initial }: { studentId: string; init
           </select>
           {fe.status && <span className="err">{fe.status}</span>}
         </div>
-        {status === "PRESENT" && (
-          <>
-            <div className="field">
-              <label htmlFor="ed-start">Start time</label>
-              <input id="ed-start" type="time" name="startTime" defaultValue={initial.start} />
-              {fe.startTime && <span className="err">{fe.startTime}</span>}
-            </div>
-            <div className="field">
-              <label htmlFor="ed-end">End time</label>
-              <input id="ed-end" type="time" name="endTime" defaultValue={initial.end} />
-              {fe.endTime && <span className="err">{fe.endTime}</span>}
-            </div>
-          </>
-        )}
       </div>
+      {status === "PRESENT" && (
+        <div className="admin-times">
+          {initial.times.length > 0 && <p className="small" style={{ margin: "0 0 6px" }}>Times now: <HandTimes times={initial.times} h={26} /></p>}
+          <p className="small muted" style={{ margin: "0 0 8px" }}>To correct a time, write the right one by hand in its box. Boxes you leave empty keep the time that is there.</p>
+          <div className="timegrid">
+            {BOXES.map(([name, label]) => (
+              <div key={name} className={`timecell${fe[name] ? " bad" : ""}`}>
+                <InkField name={name} kind="time" label={label} title={`Correct ${label.toLowerCase()}`} hint="Write the correct time by hand." emptyText="Tap to write"
+                  value={ink[name] ?? null} onChange={(v) => setInk((x) => ({ ...x, [name]: v }))} compact />
+                {fe[name] && <span className="err">{fe[name]}</span>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       <div className="grid2">
         <div className="field">
           <label htmlFor="ed-reason">Reason for the change{initial.exists ? "" : " (optional for a new day)"}</label>

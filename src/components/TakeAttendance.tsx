@@ -8,6 +8,7 @@ import { usDate } from "@/lib/sheet";
 import { takeAttendanceAction } from "@/actions/staff";
 import { InkPad } from "./Ink";
 import { Msg } from "./forms";
+import { LevelDot } from "./LevelDot";
 
 /**
  * Take attendance for a whole day: tap who was absent, then sign once. Everyone else is present;
@@ -64,7 +65,7 @@ export function TakeAttendance({ date, rows: allRows }: { date: string; rows: Ro
         {shown.map((r) => (
           <button key={r.key} type="button" className={`take-btn${absent.has(r.key) ? " is-absent" : ""}${fixed(r) ? " is-fixed" : ""}${!r.sig && !fixed(r) && !absent.has(r.key) ? " no-sig" : ""}`}
             aria-pressed={absent.has(r.key)} disabled={fixed(r) || pending} onClick={() => toggle(r.key)}>
-            <span className="tb-name">{r.name}</span>
+            <span className="tb-name">{r.name} <LevelDot level={r.level} rate={r.rate} /></span>
             <span className="tb-state">{label(r)}</span>
           </button>
         ))}

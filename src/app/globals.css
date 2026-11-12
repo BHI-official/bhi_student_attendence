@@ -149,7 +149,7 @@ dialog .inner { padding: 20px; }
 .level { display: inline-flex; align-items: center; gap: 8px; font-weight: 700; }
 .level::before { content: ""; width: 14px; height: 14px; border-radius: 50%; background: #aab2c0; flex: none; box-shadow: 0 0 0 2px #fff, 0 0 0 3px currentColor; }
 .level.good { color: var(--ok); } .level.good::before { background: #1f9d55; }
-.level.attention { color: #9a5b00; } .level.attention::before { background: #f08c00; }
+.level.attention { color: #7a5c00; } .level.attention::before { background: #f5c400; }
 .level.poor { color: var(--danger); } .level.poor::before { background: #d92d20; }
 .level.none { color: var(--muted); }
 .profile-head { display: grid; grid-template-columns: 1fr auto; gap: 12px 24px; align-items: start; }
@@ -408,3 +408,8 @@ a.filter { text-decoration: none; color: inherit; }
 .mcell.has-excuse { box-shadow: 0 0 0 2px #e0a800; }
 .legend { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; margin: 4px 0 10px; }
 .legend .mcell { width: 22px; height: 22px; font-size: 12px; }
+.level.sm { gap: 5px; font-size: 13px; margin-left: 6px; vertical-align: middle; }
+.level.sm::before { width: 11px; height: 11px; }
+.take-btn .level.sm { margin-left: 4px; }
+.levels-legend .level.sm { margin-left: 4px; }
+.admin-times { margin: 4px 0 10px; }

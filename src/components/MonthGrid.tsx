@@ -2,6 +2,7 @@ import Link from "next/link";
 import type { RosterRow } from "@/lib/roster";
 import { STATUS_LABEL, type DayStatus } from "@/lib/week";
 import { WEEKDAY_NAMES, usDate, weekday } from "@/lib/sheet";
+import { LevelDot } from "./LevelDot";
 
 const MARK: Record<DayStatus, string> = { APPROVED: "✓", PENDING: "P", NEEDS_CORRECTION: "C", MISSING: "M", ABSENT: "A", EXCUSED: "E", HOLIDAY: "H", UPCOMING: "" };
 
@@ -10,9 +11,9 @@ const MARK: Record<DayStatus, string> = { APPROVED: "✓", PENDING: "P", NEEDS_C
  * status; clicking it opens the day (to sign, mark or review). Totals on the right.
  */
 export function MonthGrid({ rows, dates, dayHref, isAdmin }: { rows: RosterRow[]; dates: string[]; dayHref: (date: string) => string; isAdmin: boolean }) {
-  const students = new Map<string, { id: string; name: string; program: string; teacher: string; days: Map<string, RosterRow> }>();
+  const students = new Map<string, { id: string; name: string; program: string; teacher: string; level: RosterRow["level"]; rate: number | null; days: Map<string, RosterRow> }>();
   for (const r of rows) {
-    const s = students.get(r.studentId) ?? { id: r.studentId, name: r.name, program: r.program, teacher: r.teacherName, days: new Map() };
+    const s = students.get(r.studentId) ?? { id: r.studentId, name: r.name, program: r.program, teacher: r.teacherName, level: r.level, rate: r.rate, days: new Map() };
     s.days.set(r.date, r);
     students.set(r.studentId, s);
   }
@@ -39,7 +40,7 @@ export function MonthGrid({ rows, dates, dayHref, isAdmin }: { rows: RosterRow[]
             {list.map((s) => (
               <tr key={s.id}>
                 <td className="mg-name">
-                  {isAdmin ? <Link href={`/admin/students/${s.id}`}><strong>{s.name}</strong></Link> : <strong>{s.name}</strong>}
+                  {isAdmin ? <Link href={`/admin/students/${s.id}`}><strong>{s.name}</strong></Link> : <strong>{s.name}</strong>} <LevelDot level={s.level} rate={s.rate} />
                   <span className="small muted block">{s.program}{isAdmin && s.teacher ? ` · ${s.teacher}` : ""}</span>
                 </td>
                 {dates.map((d) => {
