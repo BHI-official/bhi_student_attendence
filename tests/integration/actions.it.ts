@@ -202,6 +202,17 @@ test("one record per day: submitting again updates the same day and keeps the ea
   assert.match(after.history.at(-1).what, new RegExp(before.studentSignature.id));
 });
 
+test("double-tap / two tablets at once: still exactly one record for the day", async () => {
+  const maria = await byName("Maria Lopez");
+  await asStudent(maria._id);
+  const results = await Promise.all([1, 2, 3, 4, 5].map(() => ST.submitDayAction(lastWed, {}, day())));
+  assert.ok(results.some((r: any) => r.ok), JSON.stringify(results));
+  for (const r of results as any[]) if (!r.ok) assert.match(r.error, /just saved from another screen|changed in the meantime/);
+  assert.equal(await db.collection("entries").countDocuments({ studentId: maria._id, date: lastWed }), 1);
+  const e: any = await entry(maria._id, lastWed);
+  assert.ok(e.studentSignature, "the one record is complete and signed");
+});
+
 // ---------------------------------------------------------------- teacher
 
 test("teacher approves several days at once with one handwritten signature; approved days lock for the student", async () => {
@@ -323,6 +334,28 @@ test("excuse: student uploads for an absence, teacher approves, the day becomes 
   assert.ok((await S.decideExcuseAction(key, {}, fd({ decision: "APPROVED" }))).ok);
 });
 
+test("excuse documents: only the student, their own teacher and admins can open them", async () => {
+  const jen = await byName("Jennifer Quezada"), alex = await byName("Alexandra Mendez");
+  const route = await import("../../src/app/api/excuse/[key]/route");
+  const open = async () => (await route.GET(new Request("http://x/api/excuse/k"), { params: Promise.resolve({ key: encodeURIComponent(`${jen._id}:${lastThu}`) }) }));
+  jar().clear();
+  assert.equal((await open()).status, 404, "not signed in");
+  await asStudent(jen._id);
+  const own = await open();
+  assert.equal(own.status, 200, "the student herself");
+  assert.equal(own.headers.get("content-type"), "application/pdf");
+  assert.equal(own.headers.get("x-content-type-options"), "nosniff");
+  await asStudent(alex._id);
+  assert.equal((await open()).status, 404, "another student");
+  await asStaff(ids.omar);
+  assert.equal((await open()).status, 404, "a teacher who doesn't teach her");
+  await asStaff(ids.saniya);
+  assert.equal((await open()).status, 200, "her own teacher");
+  await asStaff(ids.admin);
+  assert.equal((await open()).status, 200, "an admin");
+  assert.ok(await db.collection("audit_logs").findOne({ action: "excuse.view" }), "every opening is logged");
+});
+
 test("a student can report an absence they weren't marked for, with a document", async () => {
   const alex = await byName("Alexandra Mendez");
   await asStudent(alex._id);
@@ -364,6 +397,15 @@ test("reassigning a teacher changes only who manages the student; records and ap
   assert.match((await S.approveRowsAction({}, fd({ rows: JSON.stringify([`${jen._id}:${lastTue}`]), signature: SIG }))).error, /not one of your students/);
   await asStaff(ids.omar);
   assert.ok((await S.approveRowsAction({}, fd({ rows: JSON.stringify([`${jen._id}:${lastTue}`]), signature: SIG }))).ok);
+
+  // A new submission after the change goes to the new teacher only.
+  await asStudent(jen._id);
+  const sub = await ST.submitDayAction(lastFri, {}, day());
+  assert.ok(sub.ok, JSON.stringify(sub));
+  assert.match(sub.message, /Sent to Omar Teacher/);
+  const fresh = (st: any) => roster.loadRoster(st, { from: lastFri, to: lastFri }).then((x: any) => x.rows.filter((r: any) => r.name === "Jennifer Quezada"));
+  assert.equal((await fresh(omar))[0]?.status, "PENDING");
+  assert.equal((await fresh(saniya)).length, 0, "not on the previous teacher's roster");
 
   // The assignment history: Saniya's period is closed, Omar's is open.
   const periods = await db.collection("teacher_assignments").find({ studentId: jen._id }).sort({ from: 1 }).toArray();
@@ -425,6 +467,41 @@ test("admin corrects any day, including old ones; the original is kept and the s
   assert.equal(e.excuse.status, "APPROVED");
 });
 
+test("admin moves a day to the correct date: signature and history move with it, original kept in the audit log", async () => {
+  const jen = await byName("Jennifer Quezada");
+  // Jennifer has an approved Monday (by Dr. Saniya). Move it to a free day: the Friday two weeks back.
+  const from = lastMon, to = sheet.addDays(lastMon, -3);
+  await db.collection("entries").deleteOne({ _id: `${jen._id}:${to}` as any });
+  const before: any = await entry(jen._id, from);
+  assert.ok(before.studentSignature && before.staffSignature);
+
+  await asStaff(ids.omar);
+  assert.match((await S.adminMoveDayAction(jen._id, from, {}, fd({ to, reason: "wrong row" }))).error, /Only an admin/);
+  await asStaff(ids.admin);
+  assert.ok((await S.adminMoveDayAction(jen._id, from, {}, fd({ to, reason: "" }))).fieldErrors?.reason);
+  assert.match((await S.adminMoveDayAction(jen._id, from, {}, fd({ to: lastTue, reason: "wrong row" }))).fieldErrors?.to ?? "", /already has a record/);
+  assert.match((await S.adminMoveDayAction(jen._id, from, {}, fd({ to: sheet.addDays(lastMon, -1), reason: "x y z" }))).fieldErrors?.to ?? "", /Monday to Friday/);
+  assert.match((await S.adminMoveDayAction(jen._id, from, {}, fd({ to: sheet.addDays(today, 7), reason: "x y z" }))).fieldErrors?.to ?? "", /hasn't happened/);
+
+  const go = await redirected(S.adminMoveDayAction(jen._id, from, {}, fd({ to, reason: "Signed Monday's row for the Friday before" })));
+  assert.equal(go, `/admin/students/${jen._id}?day=${to}&moved=${from}#edit`, "opens the day at its new date");
+  assert.equal(await entry(jen._id, from), null, "nothing left on the wrong date");
+  const after: any = await entry(jen._id, to);
+  assert.equal(after.studentSignature.id, before.studentSignature.id, "the student's own signature moved, not redrawn");
+  assert.equal(after.startInkId, before.startInkId);
+  assert.equal(after.staffSignature, null, "the teacher signs the moved day again");
+  assert.equal(after.history.length, before.history.length + 1, "earlier history kept");
+  const last = after.history.at(-1);
+  assert.equal(last.byName, "Ada Admin");
+  assert.match(last.what, /moved from .* to .*approval by Dr\. Saniya removed/);
+  assert.equal(last.reason, "Signed Monday's row for the Friday before");
+  const log: any = await db.collection("audit_logs").findOne({ action: "admin.move_day" });
+  assert.equal(log.meta.from, from);
+  assert.equal(log.meta.before.staffSignature.staffName, "Dr. Saniya");
+  // Moving it back works the same way.
+  assert.ok(await redirected(S.adminMoveDayAction(jen._id, to, {}, fd({ to: from, reason: "moved back for the test" }))));
+});
+
 test("admin can also reopen an approved day for the student", async () => {
   const jen = await byName("Jennifer Quezada");
   await asStaff(ids.omar);
@@ -434,6 +511,84 @@ test("admin can also reopen an approved day for the student", async () => {
   const e: any = await entry(jen._id, lastTue);
   assert.equal(week.dayStatus(e, false, lastTue, today), "NEEDS_CORRECTION");
   assert.match(e.history.at(-1).what, /approval by Omar Teacher removed/);
+});
+
+test("take attendance: 30 students, tap the 5 absent, one signature approves the 25 who signed", async () => {
+  const T = "22222222-2222-4222-8222-222222222222";
+  await db.collection("staff").insertOne({ _id: T, name: "Mr. Rakesh", email: "rakesh@x.test", position: "Instructor", role: "TEACHER", passwordHash: "x", active: true, createdAt: new Date() } as any);
+  await asStaff(ids.admin);
+  const kids: any[] = [];
+  for (let i = 0; i < 30; i++) {
+    assert.ok((await A.saveStudentAction(null, {}, studentForm(`Class Student ${String(i).padStart(2, "0")}`, T))).ok);
+    kids.push(await byName(`Class Student ${String(i).padStart(2, "0")}`));
+  }
+  const date = lastThu;
+  for (const k of kids) { await asStudent(k._id); assert.ok((await ST.submitDayAction(date, {}, day())).ok); }
+  const key = (k: any) => `${k._id}:${date}`;
+  const absent = kids.slice(0, 5).map(key);
+
+  // An admin can't do it (the teacher column is the teacher's signature); a signature is required.
+  await asStaff(ids.admin);
+  assert.match((await S.takeAttendanceAction({}, fd({ date, absent: JSON.stringify(absent), signature: SIG }))).error, /Only the students' teacher/);
+  jar().clear(); await auth.startStaffSession({ _id: T, passwordHash: "x" });
+  assert.match((await S.takeAttendanceAction({}, fd({ date, absent: JSON.stringify(absent) }))).error, /Sign by hand/);
+
+  // Another teacher's student slipped into the absent list is ignored.
+  const outsider = await byName("Alexandra Mendez");
+  const r = await S.takeAttendanceAction({}, fd({ date, absent: JSON.stringify([...absent, `${outsider._id}:${date}`]), signature: SIG }));
+  assert.ok(r.ok, JSON.stringify(r));
+  assert.match(r.message, /25 approved and signed, 5 absent/);
+  const rows = await db.collection("entries").find({ _id: { $in: kids.map(key) } as any }).toArray() as any[];
+  const approved = rows.filter((e) => e.staffSignature);
+  assert.equal(approved.length, 25);
+  assert.equal(new Set(approved.map((e) => e.staffSignature.id)).size, 1, "one signature, stored on all 25");
+  assert.equal(approved[0].staffSignature.staffName, "Mr. Rakesh");
+  assert.deepEqual(rows.filter((e) => e.status === "ABSENT").map((e) => e._id).sort(), [...absent].sort());
+  assert.equal(((await entry(outsider._id, date)) as any)?.status !== "ABSENT", true, "the other teacher's student was not touched");
+  assert.equal(await db.collection("signatures").countDocuments({ ownerId: T }), 1, "exactly one signature saved");
+
+  // Next day: one student hasn't signed, one was sent back, one is un-marked absent; the approved ones stay.
+  const d2 = lastFri;
+  for (const k of kids.slice(0, 27)) { await asStudent(k._id); assert.ok((await ST.submitDayAction(d2, {}, day())).ok); }
+  jar().clear(); await auth.startStaffSession({ _id: T, passwordHash: "x" });
+  assert.ok((await S.rejectRowAction(key(kids[26]).replace(date, d2), {}, fd({ reason: "Missing lunch time" }))).ok);
+  const r2 = await S.takeAttendanceAction({}, fd({ date: d2, absent: JSON.stringify([`${kids[29]._id}:${d2}`]), signature: SIG }));
+  assert.ok(r2.ok, JSON.stringify(r2));
+  assert.match(r2.message, /26 approved and signed, 1 absent/);
+  assert.match(r2.message, /hasn't signed yet: Class Student 27/);
+  assert.match(r2.message, /Sent back, waiting for the student: Class Student 26/);
+  const unsigned: any = await entry(kids[27]._id, d2);
+  assert.equal(unsigned.status, "PRESENT");
+  assert.equal(unsigned.markedBy.staffName, "Mr. Rakesh");
+  assert.equal(unsigned.staffSignature, null, "never approved without the student's signature");
+  // Correcting a mistake: student 0 was actually present on the first day (they had signed) -> approved now.
+  const r3 = await S.takeAttendanceAction({}, fd({ date, absent: JSON.stringify(absent.slice(1)), signature: SIG }));
+  assert.match(r3.message, /1 approved and signed, 4 absent/);
+  assert.ok(((await entry(kids[0]._id, date)) as any).staffSignature);
+  // A locked day (older than last week) is refused.
+  assert.match((await S.takeAttendanceAction({}, fd({ date: oldDay, absent: "[]", signature: SIG }))).error, /locked/);
+
+  // Two programs on one roster: taking attendance for one program leaves the other untouched.
+  await asStaff(ids.admin);
+  for (const n of ["Phleb One", "Phleb Two"]) {
+    const f = studentForm(n, T); f.set("courseName", "Phlebotomy");
+    assert.ok((await A.saveStudentAction(null, {}, f)).ok);
+  }
+  const phleb = [await byName("Phleb One"), await byName("Phleb Two")];
+  const d3 = lastWed;
+  for (const k of [...phleb, kids[0], kids[1]]) { await asStudent(k._id); assert.ok((await ST.submitDayAction(d3, {}, day())).ok); }
+  jar().clear(); await auth.startStaffSession({ _id: T, passwordHash: "x" });
+  const r4 = await S.takeAttendanceAction({}, fd({ date: d3, program: "Phlebotomy", absent: JSON.stringify([`${kids[1]._id}:${d3}`]), signature: SIG }));
+  assert.ok(r4.ok, JSON.stringify(r4));
+  assert.match(r4.message, /Phlebotomy saved: 2 approved and signed, 0 absent/);
+  for (const k of phleb) assert.ok(((await entry(k._id, d3)) as any).staffSignature);
+  for (const k of [kids[0], kids[1]]) {
+    const e: any = await entry(k._id, d3);
+    assert.equal(e.staffSignature, null, "the other program's students are untouched");
+    assert.equal(e.status, "PRESENT", "an absent tap for another program is ignored");
+  }
+  const { programs } = await roster.loadRoster({ _id: T, role: "TEACHER" }, { from: d3, to: d3 });
+  assert.deepEqual(programs, ["Clinical Medical Assistant", "Phlebotomy"]);
 });
 
 test("Mahek signs off a finished month by hand; teacher days must be checked first; the month then locks", async () => {

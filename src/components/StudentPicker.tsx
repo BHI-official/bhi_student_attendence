@@ -24,7 +24,9 @@ export function StudentPicker({ students }: { students: S[] }) {
           <button key={l} type="button" aria-pressed={letter === l} onClick={() => { setLetter(letter === l ? "" : l); setQ(""); }}>{l}</button>
         ))}
       </div>
-      {!q && !letter && students.length > 24 ? (
+      {students.length === 0 ? (
+        <p className="msg info">No students have been added yet. Please ask the office.</p>
+      ) : !q && !letter && students.length > 24 ? (
         <p className="muted">Start typing your name, or tap a letter.</p>
       ) : shown.length === 0 ? (
         <p className="msg info">No name matches “{q}”. Check the spelling, or ask a staff member.</p>

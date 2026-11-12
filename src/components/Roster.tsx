@@ -10,6 +10,7 @@ import { WEEKDAY_NAMES, usDate, weekday } from "@/lib/sheet";
 import { approveRowsAction, decideExcuseAction, markRowsAction, rejectRowAction } from "@/actions/staff";
 import { InkPad } from "./Ink";
 import { HandTimes } from "./HandTimes";
+import { TakeAttendance } from "./TakeAttendance";
 import { Msg } from "./forms";
 
 type Filter = "action" | "all" | "MISSING" | "PENDING" | "NEEDS_CORRECTION" | "EXCUSE" | "APPROVED" | "ABSENT" | "LATE";
@@ -21,7 +22,7 @@ const FILTERS: [Filter, string, (r: RosterRow) => boolean][] = [
   ["PENDING", "Pending", (r) => r.status === "PENDING"],
   ["EXCUSE", "Excuses to review", (r) => r.excuse?.status === "PENDING"],
   ["NEEDS_CORRECTION", "Needs correction", (r) => r.status === "NEEDS_CORRECTION"],
-  ["LATE", "Submitted late", (r) => r.late && r.status === "PENDING"],
+  ["LATE", "Submitted late", (r) => r.late],
   ["APPROVED", "Approved", (r) => r.status === "APPROVED"],
   ["ABSENT", "Absent", (r) => r.status === "ABSENT"],
   ["all", "Everyone", () => true],
@@ -38,7 +39,7 @@ function Ink({ id, alt, h = 34 }: { id: string | null; alt: string; h?: number }
   return id ? <img className="inkimg" src={`/api/ink/${id}`} alt={alt} height={h} loading="lazy" /> : null;
 }
 
-export function Roster({ rows, isAdmin, programs, grouped }: { rows: RosterRow[]; isAdmin: boolean; programs: string[]; grouped: boolean }) {
+export function Roster({ rows, isAdmin, programs, grouped, takeDate }: { rows: RosterRow[]; isAdmin: boolean; programs: string[]; grouped: boolean; takeDate?: string | null }) {
   const router = useRouter();
   const [filter, setFilter] = useState<Filter>("action");
   const [program, setProgram] = useState("");
@@ -79,8 +80,11 @@ export function Roster({ rows, isAdmin, programs, grouped }: { rows: RosterRow[]
     if (g && g[0] === r.date) g[1].push(r); else groups.push([r.date, [r]]);
   }
 
+  const waitingAll = rows.filter((r) => r.status === "PENDING" && !r.signedOffBy);
   return (
     <div className="roster">
+      {takeDate && !isAdmin && <TakeAttendance key={takeDate} date={takeDate} rows={rows} />}
+      {takeDate && !isAdmin && <h2 className="details-h">Details</h2>}
       <Msg state={msg} />
       <div className="filters" role="group" aria-label="Show">
         {FILTERS.map(([k, label]) => (
@@ -113,6 +117,9 @@ export function Roster({ rows, isAdmin, programs, grouped }: { rows: RosterRow[]
         )}
         <button type="button" className="btn ghost" disabled={pending || !markable.length} onClick={() => run(markRowsAction, { rows: JSON.stringify(markable.map((r) => r.key)), mark: "PRESENT" }, () => setPicked(new Set()))}>Mark present</button>
         <button type="button" className="btn ghost" disabled={pending || !markable.length} onClick={() => run(markRowsAction, { rows: JSON.stringify(markable.map((r) => r.key)), mark: "ABSENT" }, () => setPicked(new Set()))}>Mark absent</button>
+        {!isAdmin && waitingAll.length > 0 && (
+          <button type="button" className="btn ghost" onClick={() => setPicked(new Set(waitingAll.map((r) => r.key)))}>Select all waiting for my signature ({waitingAll.length})</button>
+        )}
         <button type="button" className="linkbtn" onClick={() => setPicked(new Set())} disabled={!picked.size}>Clear</button>
       </div>
 
@@ -187,7 +194,7 @@ function RowView({ r, grouped, isAdmin, picked, onPick, pending, open, setOpen, 
         </td>
         <td>
           <StatusChip status={r.status} mark={r.mark} />
-          {r.late && r.status === "PENDING" && <span className="tag warn">submitted late</span>}
+          {r.late && <span className="tag warn">submitted late</span>}
           {r.approvedBy && <span className="small muted block">signed by {r.approvedBy}</span>}
           {r.approvedSig && <Ink id={r.approvedSig} alt={`Signature of ${r.approvedBy}`} h={28} />}
           {r.signedOffBy && <span className="small muted block">Month signed off by {r.signedOffBy}</span>}

@@ -62,6 +62,22 @@ async function main() {
   if (moved) console.log(`${moved} student(s) put on their course teacher's roster.`);
   if (unclear.length) console.log(`${unclear.length} student(s) need a teacher (Admin → Students & teachers):\n  ${unclear.slice(0, 20).join("\n  ")}${unclear.length > 20 ? "\n  …" : ""}`);
 
+  if (await staff.countDocuments({ role: "ADMIN", active: true })) {
+    console.log("An admin account already exists.");
+  } else {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    const name = process.env.ADMIN_NAME || (await rl.question("Admin name: ")).trim();
+    const email = (process.env.ADMIN_EMAIL || (await rl.question("Admin email: "))).trim().toLowerCase();
+    const position = (process.env.ADMIN_POSITION ?? (await rl.question("Admin position, printed with their signature (e.g. Asst. Director): "))).trim() || "Admin";
+    const password = process.env.ADMIN_PASSWORD || (await rl.question("Admin password (10+ characters): "));
+    rl.close();
+    if (name.length < 2 || !email.includes("@") || password.length < 10) throw new Error("Name, a valid email and a 10+ character password are required.");
+    await staff.insertOne({
+      _id: randomUUID() as never, name, email, position, role: "ADMIN", passwordHash: await bcrypt.hash(password, 12),
+      active: true, createdAt: new Date(),
+    });
+    console.log(`Admin created: ${email}. Sign in at /admin/login.`);
+  }
   // The "Approved by" section at the bottom of each month is signed by one chosen admin (Mahek).
   // If nobody is chosen yet and an active admin named Mahek exists, she is chosen.
   if (!(await staff.countDocuments({ role: "ADMIN", active: true, signsOff: true }))) {
@@ -77,21 +93,6 @@ async function main() {
   const other = await db.collection("month_approvals").countDocuments({ staffId: { $nin: signerIds } });
   if (other) console.log(`${other} month sign-off(s) were signed by someone else. They show "Needs your signature" on Admin → Monthly sign-off for the signer to sign again.`);
 
-  if (await staff.countDocuments({ role: "ADMIN", active: true })) {
-    console.log("An admin account already exists. Nothing else to do.");
-  } else {
-    const rl = createInterface({ input: process.stdin, output: process.stdout });
-    const name = process.env.ADMIN_NAME || (await rl.question("Admin name: ")).trim();
-    const email = (process.env.ADMIN_EMAIL || (await rl.question("Admin email: "))).trim().toLowerCase();
-    const password = process.env.ADMIN_PASSWORD || (await rl.question("Admin password (10+ characters): "));
-    rl.close();
-    if (name.length < 2 || !email.includes("@") || password.length < 10) throw new Error("Name, a valid email and a 10+ character password are required.");
-    await staff.insertOne({
-      _id: randomUUID() as never, name, email, position: "Admin", role: "ADMIN", passwordHash: await bcrypt.hash(password, 12),
-      active: true, createdAt: new Date(),
-    });
-    console.log(`Admin created: ${email}. Sign in at /admin/login.`);
-  }
   await client.close();
 }
 

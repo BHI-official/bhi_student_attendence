@@ -14,6 +14,12 @@ Hours are not calculated. Every day needs a new handwritten signature; nothing i
 Absent? **Upload excuse** (PDF, JPG or PNG, 4 MB max, optional explanation). Older days and approved days are locked;
 the full history stays visible and downloads as a PDF.
 
+**Teacher: Take attendance (one signature for the whole class)** — the teacher opens on today. Every student is a
+button: tap the ones who were **absent**, then **Sign once and save**. Absent ones are marked absent; everyone else
+who has signed is approved with that one handwritten signature (30 students, 5 absent: 5 taps, 1 signature, 25
+approved). Present students who haven't signed yet are marked present and listed; their day comes back for the
+teacher's signature once they sign. Works for any day of this week and last week (pick it with ‹ ›).
+
 **Teacher** — one **roster** of the students assigned to them, in a **Day** or **Week** view (current week, last week,
 and older weeks to look at). Each row shows the four handwritten times, the student's signature (or **No signature**),
 the status and the teacher's own signature once approved. Teachers can:
@@ -83,6 +89,15 @@ then “Approved by” (staff name/position, signature, comments) at the bottom.
    Admin → Staff. `npm run setup` does this automatically when exactly one active admin is named Mahek.
 
 After upgrading: open **Admin → Students & teachers**, filter **Teacher: Not assigned**, tick them and assign.
+
+## Clearing the database
+
+```bash
+npm run clear-db
+```
+
+Deletes everything in the database named in `MONGODB_URI` after you type its name. Nothing is recreated: run
+`npm run setup` afterwards to create the indexes and an admin. This cannot be undone.
 
 ## Checks
 

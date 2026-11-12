@@ -112,7 +112,16 @@ export async function importStudentsAction(_: ActionState, fd: FormData): Promis
   const emails = [...new Set(add.map((r) => r.teacherEmail).filter(Boolean))];
   const teachers = new Map((await staffCol.find({ email: { $in: emails }, role: "TEACHER", active: true }).toArray()).map((t) => [t.email, t]));
   const unknown = emails.filter((e) => !teachers.has(e));
-  if (unknown.length) return { error: `Nothing was imported. No active teacher has the email ${unknown.slice(0, 5).join(", ")}${unknown.length > 5 ? "…" : ""}. Add the teacher first, or leave teacherEmail empty.` };
+  if (unknown.length) {
+    const admins = (await staffCol.find({ email: { $in: unknown }, role: "ADMIN" }, { projection: { email: 1 } }).toArray()).map((x) => x.email);
+    const list = (xs: string[]) => `${xs.slice(0, 5).join(", ")}${xs.length > 5 ? "…" : ""}`;
+    const missing = unknown.filter((e) => !admins.includes(e));
+    return {
+      error: "Nothing was imported. "
+        + (admins.length ? `${list(admins)} ${admins.length === 1 ? "is an admin account" : "are admin accounts"}; only teacher accounts can have students (change the role on the Staff page). ` : "")
+        + (missing.length ? `No active teacher has the email ${list(missing)}. Add the teacher first, or leave teacherEmail empty.` : ""),
+    };
+  }
   const used = new Set(typedSeen.keys());
   const pins: { name: string; pin: string }[] = [];
   const docs: Student[] = [];

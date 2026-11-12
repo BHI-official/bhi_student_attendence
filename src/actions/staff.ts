@@ -11,8 +11,9 @@ import { holidaysBetween, thisMonth, today } from "@/lib/data";
 import { DATE_RE, MONTH_RE, addDays, isClassDay, minutesBetween, monthTitle, parseTime, time12, usDate } from "@/lib/sheet";
 import { entriesHash } from "@/lib/hash";
 import { canSee } from "@/lib/access";
+import { loadRoster } from "@/lib/roster";
 import { checkSignaturePng, saveSignature } from "@/lib/signatures";
-import { EXCUSE_MAX_BYTES, STATUS_LABEL, dayStatus, safeFileName, sniffExcuse, teacherLock } from "@/lib/week";
+import { EXCUSE_MAX_BYTES, STATUS_LABEL, dayStatus, isWeekday, safeFileName, sniffExcuse, teacherLock } from "@/lib/week";
 import type { ActionState } from "@/lib/action";
 
 const refresh = () => { revalidatePath("/admin", "layout"); revalidatePath("/teacher", "layout"); revalidatePath("/student", "layout"); };
@@ -80,6 +81,51 @@ const summarize = (done: number, verb: string, problems: string[]) => {
   return done ? { ok: true, message: `${verb} ${done} day${done === 1 ? "" : "s"}.${extra}` } : { error: `Nothing changed.${extra}` };
 };
 
+type Row = Extract<Awaited<ReturnType<typeof rowFor>>, { ok: true }>;
+type StaffSig = { id: string; at: Date; staffId: string; staffName: string };
+
+/** Approve one signed day with the teacher's signature. Returns why not, or null when done. */
+async function approveOne(staff: Staff, key: string, r: Row, signature: StaffSig, now: Date): Promise<string | null> {
+  const who = `${r.student.name} ${usDate(r.date)}`;
+  const e = r.entry;
+  if (r.status === "APPROVED") return `${who} is already approved`;
+  if (!e || e.status !== "PRESENT" || !e.studentSignature) return `${who} has no signed submission`;
+  const res = await (await entries()).updateOne(
+    { _id: key, staffSignature: null, status: "PRESENT", "studentSignature.id": e.studentSignature.id },
+    {
+      $set: { staffSignature: signature, correction: null, updatedAt: now },
+      $push: { history: { at: now, byId: staff._id, byName: staff.name, what: "checked and signed by teacher", reason: "" } },
+    },
+  );
+  return res.modifiedCount ? null : `${who} changed in the meantime`;
+}
+
+/** Mark one day present or absent. Returns why not, or null when done. */
+async function markOne(staff: Staff, key: string, r: Row, mark: "PRESENT" | "ABSENT", now: Date): Promise<string | null> {
+  const who = `${r.student.name} ${usDate(r.date)}`;
+  if (staff.role !== "ADMIN" && teacherLock(r.date, today())) return `${who} is locked`;
+  if (!isClassDay(r.student, r.date)) return `${who} isn't a class day`;
+  if (r.status === "HOLIDAY") return `${who} is a holiday`;
+  if (r.status === "APPROVED") return `${who} is approved (an admin can change it)`;
+  if (r.status === "EXCUSED") return `${who} is excused (an admin can change it)`;
+  const col = await entries();
+  const markedBy = { staffId: staff._id, staffName: staff.name, at: now, mark };
+  const history = { at: now, byId: staff._id, byName: staff.name, what: `marked ${mark === "PRESENT" ? "present" : "absent"}`, reason: "" };
+  if (!r.entry) {
+    const row: Entry = {
+      _id: key, studentId: r.student._id, date: r.date, status: mark, startAt: null, endAt: null, startTime: null, endTime: null, minutes: null,
+      studentSignature: null, staffSignature: null, correction: null, markedBy, excuse: null, note: "", comments: [], history: [history], updatedAt: now,
+    };
+    try { await col.insertOne(row); return null; } catch { return `${who} changed in the meantime`; }
+  }
+  if (r.entry.status === mark && r.entry.markedBy?.mark === mark) return null;
+  const res = await col.updateOne(
+    { _id: key, updatedAt: r.entry.updatedAt, staffSignature: null, status: { $in: ["PRESENT", "ABSENT"] } },
+    { $set: { status: mark, markedBy, updatedAt: now }, $push: { history } },
+  );
+  return res.modifiedCount ? null : `${who} changed in the meantime`;
+}
+
 /**
  * Approve signed attendance: the student's assigned teacher verifies and signs by hand. One signature
  * covers every day they ticked, and is stored on each of those days. Only days the student has
@@ -93,7 +139,6 @@ export async function approveRowsAction(_: ActionState, fd: FormData): Promise<A
   if (!keys) return { error: "Choose the days to approve." };
   const sig = checkSignaturePng(fd.get("signature"));
   if ("error" in sig) return { error: "Sign by hand to approve." };
-  const { entries } = await cols();
   const now = new Date();
   const sigId = await saveSignature("STAFF", staff._id, sig.png, "DRAWN", staff._id);
   const signature = { id: sigId, at: now, staffId: staff._id, staffName: staff.name };
@@ -101,19 +146,8 @@ export async function approveRowsAction(_: ActionState, fd: FormData): Promise<A
   const problems: string[] = [];
   for (const key of keys) {
     const r = await rowFor(staff, key);
-    if (!r.ok) { problems.push(r.error); continue; }
-    const who = `${r.student.name} ${usDate(r.date)}`;
-    const e = r.entry;
-    if (r.status === "APPROVED") { problems.push(`${who} is already approved`); continue; }
-    if (!e || e.status !== "PRESENT" || !e.studentSignature) { problems.push(`${who} has no signed submission`); continue; }
-    const res = await entries.updateOne(
-      { _id: key, staffSignature: null, status: "PRESENT", "studentSignature.id": e.studentSignature.id },
-      {
-        $set: { staffSignature: signature, correction: null, updatedAt: now },
-        $push: { history: { at: now, byId: staff._id, byName: staff.name, what: "checked and signed by teacher", reason: "" } },
-      },
-    );
-    if (res.modifiedCount) done++; else problems.push(`${who} changed in the meantime`);
+    const problem = r.ok ? await approveOne(staff, key, r, signature, now) : r.error;
+    if (problem) problems.push(problem); else done++;
   }
   await audit(staff._id, "staff.approve", "entries", { approved: done, skipped: problems.length, signatureId: sigId, rows: keys.length });
   refresh();
@@ -163,43 +197,89 @@ export async function markRowsAction(_: ActionState, fd: FormData): Promise<Acti
   if (!keys) return { error: "Choose the students to mark." };
   const mark = z.enum(["PRESENT", "ABSENT"]).safeParse(fd.get("mark"));
   if (!mark.success) return { error: "Choose present or absent." };
-  const col = await entries();
   const now = new Date();
-  const markedBy = { staffId: staff._id, staffName: staff.name, at: now, mark: mark.data };
-  const word = mark.data === "PRESENT" ? "present" : "absent";
   let done = 0;
   const problems: string[] = [];
   for (const key of keys) {
     const r = await rowFor(staff, key);
-    if (!r.ok) { problems.push(r.error); continue; }
-    const who = `${r.student.name} ${usDate(r.date)}`;
-    if (staff.role !== "ADMIN") {
-      const lock = teacherLock(r.date, today());
-      if (lock) { problems.push(`${who} is locked`); continue; }
-    }
-    if (!isClassDay(r.student, r.date)) { problems.push(`${who} isn't a class day`); continue; }
-    if (r.status === "HOLIDAY") { problems.push(`${who} is a holiday`); continue; }
-    if (r.status === "APPROVED") { problems.push(`${who} is approved (an admin can change it)`); continue; }
-    if (r.status === "EXCUSED") { problems.push(`${who} is excused (an admin can change it)`); continue; }
-    const history = { at: now, byId: staff._id, byName: staff.name, what: `marked ${word}`, reason: "" };
-    if (!r.entry) {
-      const row: Entry = {
-        _id: key, studentId: r.student._id, date: r.date, status: mark.data, startAt: null, endAt: null, startTime: null, endTime: null, minutes: null,
-        studentSignature: null, staffSignature: null, correction: null, markedBy, excuse: null, note: "", comments: [], history: [history], updatedAt: now,
-      };
-      try { await col.insertOne(row); done++; } catch { problems.push(`${who} changed in the meantime`); }
-      continue;
-    }
-    if (r.entry.status === mark.data && r.entry.markedBy?.mark === mark.data) { done++; continue; }
-    const res = await col.updateOne(
-      { _id: key, updatedAt: r.entry.updatedAt, staffSignature: null, status: { $in: ["PRESENT", "ABSENT"] } },
-      { $set: { status: mark.data, markedBy, updatedAt: now }, $push: { history } },
-    );
-    if (res.modifiedCount) done++; else problems.push(`${who} changed in the meantime`);
+    const problem = r.ok ? await markOne(staff, key, r, mark.data, now) : r.error;
+    if (problem) problems.push(problem); else done++;
   }
   await audit(staff._id, "staff.mark", "entries", { mark: mark.data, marked: done, skipped: problems.length });
   refresh();
-  return summarize(done, `Marked ${word}:`, problems);
+  return summarize(done, `Marked ${mark.data === "PRESENT" ? "present" : "absent"}:`, problems);
+}
+
+/**
+ * The whole class for one day, with one handwritten signature. The teacher taps who was absent;
+ * everyone else on their roster that day counts as present. Absent ones are marked absent; present
+ * ones who have signed are approved with the teacher's signature; present ones who haven't signed
+ * yet are marked present and listed (their day shows "signature missing" until they sign, then it
+ * waits for the teacher again). The list of students comes from the teacher's roster on the
+ * server, never from the browser.
+ */
+export async function takeAttendanceAction(_: ActionState, fd: FormData): Promise<ActionState> {
+  const staff = await requireStaff();
+  if (staff.role !== "TEACHER") return { error: "Only the students' teacher takes attendance and signs." };
+  const date = String(fd.get("date") ?? "");
+  if (!DATE_RE.test(date)) return { error: "Choose a day." };
+  const lock = teacherLock(date, today());
+  if (lock) return { error: lock };
+  let absent: string[] = [];
+  try {
+    const p = z.array(z.string().regex(ROW_KEY)).max(3000).safeParse(JSON.parse(String(fd.get("absent") ?? "[]")));
+    if (!p.success) return { error: "Reload the page and try again." };
+    absent = p.data;
+  } catch { return { error: "Reload the page and try again." }; }
+  const sig = checkSignaturePng(fd.get("signature"));
+  if ("error" in sig) return { error: "Sign by hand to save the day." };
+
+  // Optionally one program/class only (a teacher with two classes takes each one separately).
+  const program = String(fd.get("program") ?? "").trim().slice(0, 120) || undefined;
+  const { rows } = await loadRoster(staff, { from: date, to: date, program });
+  if (!rows.length) return { error: `No students${program ? ` in ${program}` : ""} are on your roster for ${usDate(date)}.` };
+  const absentSet = new Set(absent.filter((k) => rows.some((r) => r.key === k)));
+  const now = new Date();
+  const sigId = await saveSignature("STAFF", staff._id, sig.png, "DRAWN", staff._id);
+  const signature = { id: sigId, at: now, staffId: staff._id, staffName: staff.name };
+  const out = { approved: 0, absent: 0, notSigned: [] as string[], sentBack: [] as string[], problems: [] as string[] };
+
+  for (const row of rows) {
+    if (row.status === "HOLIDAY" || row.status === "EXCUSED") continue;
+    const first = await rowFor(staff, row.key);
+    if (!first.ok) { out.problems.push(first.error); continue; }
+    if (absentSet.has(row.key)) {
+      if (first.status === "ABSENT") { out.absent++; continue; }
+      const p = await markOne(staff, row.key, first, "ABSENT", now);
+      if (p) out.problems.push(p); else out.absent++;
+      continue;
+    }
+    if (first.status === "APPROVED") continue;
+    if (first.status === "NEEDS_CORRECTION") { out.sentBack.push(row.name); continue; }
+    // Present. Someone marked absent before is present now; someone not marked yet is marked present.
+    let r = first;
+    if (r.status === "ABSENT" || (r.status === "MISSING" && r.entry?.markedBy?.mark !== "PRESENT")) {
+      const p = await markOne(staff, row.key, r, "PRESENT", now);
+      if (p) { out.problems.push(p); continue; }
+      const again = await rowFor(staff, row.key);
+      if (!again.ok) { out.problems.push(again.error); continue; }
+      r = again;
+    }
+    if (r.status === "PENDING") {
+      const p = await approveOne(staff, row.key, r, signature, now);
+      if (p) out.problems.push(p); else out.approved++;
+    } else if (r.status === "MISSING") out.notSigned.push(row.name);
+  }
+
+  await audit(staff._id, "staff.take_attendance", date, {
+    signatureId: sigId, program: program ?? null, approved: out.approved, absent: out.absent, notSigned: out.notSigned.length, sentBack: out.sentBack.length, problems: out.problems.length,
+  });
+  refresh();
+  let message = `${usDate(date)}${program ? `, ${program}` : ""} saved: ${out.approved} approved and signed, ${out.absent} absent.`;
+  if (out.notSigned.length) message += ` Present but the student hasn't signed yet: ${out.notSigned.join(", ")}. Their day comes back to you to sign once they sign.`;
+  if (out.sentBack.length) message += ` Sent back, waiting for the student: ${out.sentBack.join(", ")}.`;
+  if (out.problems.length) message += ` Not changed: ${out.problems.slice(0, 4).join("; ")}${out.problems.length > 4 ? ` and ${out.problems.length - 4} more` : ""}.`;
+  return { ok: true, message };
 }
 
 /**
@@ -472,4 +552,59 @@ export async function changePasswordAction(_: ActionState, fd: FormData): Promis
   await startStaffSession({ ...staff, passwordHash: hash });
   await audit(staff._id, "staff.change_password", staff._id);
   return { ok: true, message: "Password changed. Other devices are signed out." };
+}
+/**
+ * An admin moves a day's record to the correct date (for example the student signed Tuesday's row
+ * for Monday). Everything moves with it: the student's own handwriting and signature (never
+ * redrawn), the excuse, comments and the full history, plus a history line saying who moved it,
+ * from which date, when and why. The target date must be empty. The teacher's approval comes off,
+ * so the teacher checks and signs the moved day again. The original is kept in the audit log.
+ */
+export async function adminMoveDayAction(studentId: string, from: string, _: ActionState, fd: FormData): Promise<ActionState> {
+  const staff = await requireStaff();
+  if (staff.role !== "ADMIN") return { error: "Only an admin can move a day to another date." };
+  const to = String(fd.get("to") ?? "");
+  const reason = String(fd.get("reason") ?? "").trim().slice(0, 300);
+  if (!z.string().uuid().safeParse(studentId).success || !DATE_RE.test(from)) return { error: "Invalid day." };
+  if (!DATE_RE.test(to)) return { fieldErrors: { to: "Choose the correct date" } };
+  if (to === from) return { fieldErrors: { to: "Choose a different date" } };
+  if (to > today()) return { fieldErrors: { to: "That date hasn't happened yet" } };
+  if (!isWeekday(to)) return { fieldErrors: { to: "Attendance is Monday to Friday" } };
+  if (reason.length < 3) return { fieldErrors: { reason: "Say why the date is wrong" } };
+  const { entries: col, students } = await cols();
+  const student = await students.findOne({ _id: studentId });
+  if (!student) return { error: "Student not found." };
+  if (to < student.startDate || to > student.endDate) return { fieldErrors: { to: `Outside ${student.name}'s course dates` } };
+  const before = await col.findOne({ _id: `${studentId}:${from}` });
+  if (!before) return { error: `Nothing is recorded on ${usDate(from)}.` };
+  const target = `${studentId}:${to}`;
+  if (await col.findOne({ _id: target }, { projection: { _id: 1 } })) return { fieldErrors: { to: `${usDate(to)} already has a record. Correct that day first.` } };
+  const now = new Date();
+  const moved: Entry = {
+    ...before, _id: target, date: to, staffSignature: null, correction: null, updatedAt: now,
+    history: [...before.history, {
+      at: now, byId: staff._id, byName: staff.name,
+      what: `admin: moved from ${usDate(from)} to ${usDate(to)}${before.staffSignature ? ` (approval by ${before.staffSignature.staffName} removed)` : ""}`, reason,
+    }],
+  };
+  try {
+    await col.insertOne(moved);
+  } catch {
+    return { error: `${usDate(to)} was just filled from another screen. Reload the page.` };
+  }
+  const del = await col.deleteOne({ _id: before._id, updatedAt: before.updatedAt });
+  if (!del.deletedCount) {
+    await col.deleteOne({ _id: target });
+    return { error: `${usDate(from)} changed in the meantime. Reload the page.` };
+  }
+  await audit(staff._id, "admin.move_day", target, {
+    from, to, reason,
+    before: {
+      status: before.status, startTime: before.startTime, endTime: before.endTime, studentSignature: before.studentSignature ?? null,
+      staffSignature: before.staffSignature ?? null, excuse: before.excuse ? { ...before.excuse } : null,
+    },
+  });
+  refresh();
+  // Open the day at its new date: the editor there shows it, with "moved from …" in its history.
+  redirect(`/admin/students/${studentId}?day=${to}&moved=${from}#edit`);
 }

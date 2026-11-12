@@ -49,6 +49,10 @@ export const courseNames = async (scope: Filter<Student> = {}) =>
   ((await (await cols()).students.distinct("courseName", { $and: [scope, { active: true }] })) as string[]).filter(Boolean).sort();
 
 /** Active teachers, for assignment menus and filters. */
+/** Active admin accounts: shown greyed out in teacher menus, since only teacher accounts can have students. */
+export const adminList = async () =>
+  (await (await cols()).staff.find({ role: "ADMIN", active: true }, { projection: { name: 1 } }).sort({ name: 1 }).toArray()).map((t) => ({ id: t._id, name: t.name }));
+
 export const teacherList = async () =>
   (await (await cols()).staff.find({ role: "TEACHER", active: true }, { projection: { name: 1 } }).sort({ name: 1 }).toArray()).map((t) => ({ id: t._id, name: t.name }));
 

@@ -20,8 +20,8 @@ export function PortalNav({ label, items }: { label: string; items: [href: strin
 export function AdminNav() {
   return (
     <PortalNav label="Admin" items={[
-      ["/admin", "Attendance"], ["/admin/sign-off", "Monthly sign-off"], ["/admin/students", "Students"], ["/admin/reports", "Reports"],
-      ["/admin/holidays", "Holidays"], ["/admin/team", "Staff"], ["/admin/account", "My account"],
+      ["/admin", "Attendance"], ["/admin/excuses", "Excuses"], ["/admin/sign-off", "Sign-off"], ["/admin/students", "Students"], ["/admin/reports", "Reports"],
+      ["/admin/holidays", "Holidays"], ["/admin/team", "Staff"], ["/admin/account", "Account"],
     ]} />
   );
 }

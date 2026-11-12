@@ -359,3 +359,32 @@ tr.picked td { background: #eef1fb; }
 }
 .timecell .linkbtn { font-size: 14px; padding: 2px 0; }
 .signer { margin: 0 0 8px; font-size: 17px; }
+
+/* Take attendance: the whole class for one day, one signature */
+.take { background: var(--paper); border: 2px solid var(--navy); border-radius: 12px; padding: 16px; margin-bottom: 18px; }
+.take h2 { margin: 0 0 6px; }
+.take-find { width: 100%; max-width: 320px; min-height: 44px; padding: 6px 12px; border: 1.5px solid #9aa5b8; border-radius: 8px; margin-bottom: 10px; }
+.take-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px; }
+.take-btn { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; min-height: 60px; padding: 10px 12px; border-radius: 10px;
+  border: 2px solid #b9d8c3; background: #f1faf4; color: var(--text); cursor: pointer; font: inherit; }
+.take-btn .tb-name { font-weight: 700; font-size: 16px; }
+.take-btn .tb-state { font-size: 13px; color: var(--ok); }
+.take-btn.no-sig { border-color: #f0d36b; background: #fffbea; }
+.take-btn.no-sig .tb-state { color: #6b5300; }
+.take-btn.is-absent { border-color: #d92d20; background: #fde8e6; }
+.take-btn.is-absent .tb-name { text-decoration: line-through; text-decoration-thickness: 2px; }
+.take-btn.is-absent .tb-state { color: #9b1c12; font-weight: 700; text-transform: uppercase; }
+.take-btn.is-fixed { opacity: .65; cursor: default; background: #f3f5f9; border-color: var(--line); }
+.take-btn.is-fixed .tb-state { color: var(--muted); }
+.take-btn:focus-visible { outline: 3px solid var(--navy); outline-offset: 2px; }
+.take-bar { position: sticky; bottom: 0; display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; justify-content: space-between;
+  margin-top: 14px; padding: 12px 0 2px; background: var(--paper); border-top: 1px solid var(--line); }
+.take-sum { margin: 0; font-size: 17px; }
+.details-h { font-size: 18px; margin: 8px 0; }
+@media (max-width: 640px) { .take-grid { grid-template-columns: 1fr 1fr; } .take-bar .btn { width: 100%; } }
+.take-programs { margin: 0 0 10px; flex-wrap: wrap; }
+.take-programs button { border: 0; background: transparent; padding: 7px 14px; font: inherit; font-weight: 700; color: var(--navy); cursor: pointer; }
+.take-programs button[aria-pressed="true"] { background: var(--navy); color: #fff; }
+.excuse-decide input { min-height: 36px; padding: 4px 8px; border: 1.5px solid #9aa5b8; border-radius: 8px; min-width: 160px; }
+.excuse-decide .msg { margin: 6px 0 0; padding: 6px 10px; font-size: 14px; }
+a.filter { text-decoration: none; color: inherit; }

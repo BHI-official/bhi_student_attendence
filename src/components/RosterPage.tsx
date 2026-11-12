@@ -13,7 +13,8 @@ export type RosterParams = { view?: string; date?: string; teacher?: string; pro
 export async function RosterPage({ staff, sp, base }: { staff: Staff; sp: RosterParams; base: string }) {
   const now = today();
   const isAdmin = staff.role === "ADMIN";
-  const view = sp.view === "day" ? "day" : "week";
+  // Teachers open on the Day view (taking attendance); admins on the Week view.
+  const view = sp.view === "day" || sp.view === "week" ? sp.view : isAdmin ? "week" : "day";
   let date = DATE_RE.test(sp.date ?? "") && sp.date! <= now ? sp.date! : now;
   if (view === "day" && !isWeekday(date)) date = addDays(mondayOf(date), 4); // a weekend shows that Friday
   const monday = mondayOf(date);
@@ -36,7 +37,8 @@ export async function RosterPage({ staff, sp, base }: { staff: Staff; sp: Roster
 
   return (
     <main className="wrap wide">
-      {from <= now && to >= now && <AutoRefresh seconds={30} />}
+      {/* Any open roster (this week or an earlier one) picks up new submissions by itself. */}
+      <AutoRefresh seconds={20} />
       <div className="rosterhead">
         <div>
           <h1>{isAdmin ? "All attendance" : "My attendance roster"}</h1>
@@ -62,6 +64,15 @@ export async function RosterPage({ staff, sp, base }: { staff: Staff; sp: Roster
             : <span className="btn ghost sm" aria-disabled="true">›</span>}
           {date !== now && <Link className="small" href={link({ date: now })}>Back to {view === "day" ? "today" : "this week"}</Link>}
         </div>
+        <form className="row" action={base}>
+          <input type="hidden" name="view" value={view} />
+          {teacherId && <input type="hidden" name="teacher" value={teacherId} />}
+          <div className="field" style={{ margin: 0 }}>
+            <label htmlFor="r-date">Go to date</label>
+            <input id="r-date" type="date" name="date" defaultValue={date} max={now} />
+          </div>
+          <button className="btn ghost">Go</button>
+        </form>
         {isAdmin && (
           <form className="row" action={base}>
             <input type="hidden" name="view" value={view} />
@@ -83,7 +94,8 @@ export async function RosterPage({ staff, sp, base }: { staff: Staff; sp: Roster
       {studentCount === 0 ? (
         <p className="empty">{isAdmin ? "No students match." : "No students are assigned to you yet. An admin assigns students to teachers."}</p>
       ) : (
-        <Roster key={`${from}:${to}:${teacherId ?? ""}`} rows={rows} isAdmin={isAdmin} programs={programs} grouped={view === "week"} />
+        <Roster key={`${from}:${to}:${teacherId ?? ""}`} rows={rows} isAdmin={isAdmin} programs={programs} grouped={view === "week"}
+          takeDate={view === "day" && !isAdmin && date >= oldest ? date : null} />
       )}
     </main>
   );

@@ -2,7 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { EMPTY_PROFILE, cols } from "@/lib/db";
 import { requireAdmin } from "@/lib/auth";
-import { courseNames, teacherList, thisMonth, today } from "@/lib/data";
+import { adminList, courseNames, teacherList, thisMonth, today } from "@/lib/data";
 import { thresholds } from "@/lib/policy";
 import { env } from "@/lib/env";
 import { loadStudentNotes } from "@/lib/notes";
@@ -12,14 +12,14 @@ import {
 } from "@/lib/sheet";
 import { STATUS_LABEL, dayStatus } from "@/lib/week";
 import { assignTeacherAction, resetPinAction, saveStudentAction, saveStudentProfileAction, setStudentActiveAction } from "@/actions/admin";
-import { ActionForm, Submit } from "@/components/forms";
+import { ActionForm, Field, Submit } from "@/components/forms";
 import { StudentNotes } from "@/components/StudentNotes";
 import { AdminDayEditor } from "@/components/AdminDayEditor";
 import { HandTimes } from "@/components/HandTimes";
 import { SignOffPanel } from "@/components/SignOff";
 import { dayTimes } from "@/lib/roster";
 import { entriesHash } from "@/lib/hash";
-import { removeMonthSignOffAction } from "@/actions/staff";
+import { adminMoveDayAction, removeMonthSignOffAction } from "@/actions/staff";
 import { PinForm, ProfileForm, StudentForm, TeacherSelect } from "../StudentForms";
 
 export const dynamic = "force-dynamic";
@@ -31,7 +31,7 @@ function Level({ s }: { s: AttendanceSummary }) {
   return <span className={`level ${s.level}`}>{LEVEL_WORDS[s.level]}{s.rate !== null && `: ${s.rate}%`}</span>;
 }
 
-export default async function StudentProfilePage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ month?: string; day?: string }> }) {
+export default async function StudentProfilePage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ month?: string; day?: string; moved?: string }> }) {
   const staff = await requireAdmin();
   const { id } = await params;
   const sp = await searchParams;
@@ -111,7 +111,7 @@ export default async function StudentProfilePage({ params, searchParams }: { par
       <h2>Teacher</h2>
       <section className="panel">
         <p style={{ marginTop: 0 }}>{teacher ? <>On <b>{teacher.name}</b>&apos;s roster.</> : <span className="err">Not assigned to a teacher, so not on any roster.</span>}</p>
-        <TeacherSelect action={assignTeacherAction.bind(null, s._id)} teachers={teachers} current={teacher?.id ?? null} />
+        <TeacherSelect action={assignTeacherAction.bind(null, s._id)} teachers={teachers} admins={await adminList()} current={teacher?.id ?? null} />
         <p className="small muted">Changing the teacher keeps every record as it is. Days already approved keep the teacher who approved them. Days waiting for approval and new submissions go to the new teacher.</p>
         {periods.length > 0 && (
           <details>
@@ -131,6 +131,9 @@ export default async function StudentProfilePage({ params, searchParams }: { par
             <h3 style={{ margin: 0 }}>{editing ? "Correct" : "Add"} {WEEKDAY_NAMES[weekday(editDay)]}, {usDate(editDay)}</h3>
             <Link href={monthLink(month)} className="small">Close</Link>
           </div>
+          {editing && sp.moved && DATE_RE.test(sp.moved) && (
+            <p className="msg ok">Moved here from {usDate(sp.moved)}. The student&apos;s signature and handwritten times moved with it{editing.staffSignature ? "" : "; the teacher signs it again"}.</p>
+          )}
           {editing && (
             <p className="small">
               Now: <b>{STATUS_LABEL[dayStatus(editing, holidayMap.has(editDay), editDay, now)]}</b>
@@ -143,6 +146,19 @@ export default async function StudentProfilePage({ params, searchParams }: { par
             date: editDay, status: editing?.status ?? "PRESENT", start: editing?.startTime ?? "", end: editing?.endTime ?? "", note: editing?.note ?? "",
             exists: !!editing, hasStudentSignature: !!editing?.studentSignature,
           }} />
+          {editing && (
+            <details style={{ marginTop: 12 }}>
+              <summary>Wrong date? Move this day to another date</summary>
+              <ActionForm action={adminMoveDayAction.bind(null, s._id, editDay)} className="movedate">
+                <p className="small muted" style={{ marginTop: 6 }}>Everything moves with it, including the student&apos;s own signature and handwritten times. The teacher signs it again.</p>
+                <div className="grid2">
+                  <Field name="to" label="Correct date" type="date" required />
+                  <Field name="reason" label="Reason" placeholder="e.g. Signed Tuesday's row for Monday" required />
+                </div>
+                <Submit className="btn ghost">Move</Submit>
+              </ActionForm>
+            </details>
+          )}
           {editing && editing.history.length > 0 && (
             <details style={{ marginTop: 12 }} open>
               <summary>Changes to this day ({editing.history.length})</summary>

@@ -9,7 +9,7 @@ import { HandTimes } from "@/components/HandTimes";
 import { STATUS_LABEL, dayStatus, mondayOf, openFrom, shortDay, studentCanExcuse, studentCanSubmit, weekDates } from "@/lib/week";
 import { studentSignOutAction } from "@/actions/student";
 import { StudentDays, type StudentDay, type StudentWeek } from "@/components/StudentDays";
-import { IdleSignOut } from "@/components/Idle";
+import { AutoRefresh, IdleSignOut } from "@/components/Idle";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "My attendance" };
@@ -72,6 +72,8 @@ export default async function MyAttendance({ searchParams }: { searchParams: Pro
   return (
     <main className="wrap student-wrap">
       <IdleSignOut action={studentSignOutAction} minutes={5} />
+      {/* The teacher's approvals show up here by themselves. */}
+      <AutoRefresh seconds={20} />
       <div className="studenthead">
         <div>
           <h1>Hi, {student.name.split(" ")[0]}</h1>

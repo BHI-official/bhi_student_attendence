@@ -8,7 +8,7 @@ type Act = (prev: ActionState, fd: FormData) => Promise<ActionState>;
 export type StudentValues = { name: string; courseName: string; courseCode: string; courseDuration: string; caseManager: string; instructor: string; startDate: string; endDate: string; classDays: number[] };
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri"];
 
-export function StudentForm({ action, values, isNew, courses, teachers = [] }: { action: Act; values?: StudentValues; isNew: boolean; courses: string[]; teachers?: { id: string; name: string }[] }) {
+export function StudentForm({ action, values, isNew, courses, teachers = [], admins = [] }: { action: Act; values?: StudentValues; isNew: boolean; courses: string[]; teachers?: { id: string; name: string }[]; admins?: { id: string; name: string }[] }) {
   const v = values;
   return (
     <ActionForm action={action}>
@@ -33,8 +33,7 @@ export function StudentForm({ action, values, isNew, courses, teachers = [] }: {
       {isNew && (
         <Field name="teacherId" label="Teacher (whose roster the student is on)">
           <select id="f-teacherId" name="teacherId" defaultValue="">
-            <option value="">Assign later</option>
-            {teachers.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+            <TeacherOptions teachers={teachers} admins={admins} none={teachers.length ? "Assign later" : "No teacher accounts yet: add one on the Staff page"} />
           </select>
         </Field>
       )}
@@ -99,16 +98,30 @@ export function PinForm({ action, name }: { action: Act; name: string }) {
 }
 
 /** Pick a student's teacher. Changing it moves the student to the new roster; records stay as they are. */
-export function TeacherSelect({ action, teachers, current, compact }: { action: Act; teachers: { id: string; name: string }[]; current: string | null; compact?: boolean }) {
+export function TeacherSelect({ action, teachers, admins, current, compact }: { action: Act; teachers: { id: string; name: string }[]; admins?: { id: string; name: string }[]; current: string | null; compact?: boolean }) {
   return (
     <ActionForm action={action} className={compact ? "assign compact" : "assign"}>
       <div className="row" style={{ alignItems: "center", gap: 8 }}>
         <select name="teacherId" defaultValue={current ?? ""} aria-label="Teacher">
-          <option value="">Not assigned</option>
-          {teachers.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+          <TeacherOptions teachers={teachers} admins={admins} none="Not assigned" />
         </select>
         <Submit className="btn ghost sm">{compact ? "Save" : "Save teacher"}</Submit>
       </div>
     </ActionForm>
+  );
+}
+
+/** The teacher menu's options. Admin accounts are listed but can't be picked: only teacher accounts have a roster. */
+export function TeacherOptions({ teachers, admins = [], none }: { teachers: { id: string; name: string }[]; admins?: { id: string; name: string }[]; none: string }) {
+  return (
+    <>
+      <option value="">{none}</option>
+      {teachers.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+      {admins.length > 0 && (
+        <optgroup label="Admin accounts (make them a teacher on the Staff page first)">
+          {admins.map((t) => <option key={t.id} value="" disabled>{t.name} (admin)</option>)}
+        </optgroup>
+      )}
+    </>
   );
 }
