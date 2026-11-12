@@ -37,7 +37,7 @@ def fill_day(page, d, note=None, lunch=True):
     card.get_by_role("button", name="Fill in & sign").click()
     submit = card.get_by_role("button", name="Submit attendance"); expect(submit).to_be_enabled()
     write_time(page, card, "Start time")
-    if lunch: write_time(page, card, "Lunch start"); write_time(page, card, "Lunch end")
+    if lunch: write_time(page, card, "Lunch out"); write_time(page, card, "Lunch in")
     write_time(page, card, "End time")
     write_in(page, card, "Tap to sign", "Use this signature")
     if note: card.locator("textarea[name=note]").fill(note)
@@ -66,9 +66,17 @@ with sync_playwright() as p:
     page.screenshot(path="/tmp/shots/02-student-week.png", full_page=True)
     # The bug report: the button must never be stuck greyed out. Missing items are named instead.
     card = page.locator("li.day", has_text=short(D(0))); card.get_by_role("button", name="Fill in & sign").click()
-    write_time(page, card, "Start time"); write_time(page, card, "Lunch start")
+    # The scheduled times are shown on each box as a guide.
+    for label, sched in [("Start time", "9:00 AM"), ("Lunch out", "12:00 PM"), ("Lunch in", "12:30 PM"), ("End time", "4:00 PM")]:
+        expect(card.locator(".timecell", has_text=label).locator(".sched")).to_have_text(f"Scheduled: {sched}")
+    card.locator(".timecell", has_text="Start time").locator(".inkbubble").click()
+    expect(page.locator(".inkmodal")).to_contain_text("Scheduled start time is 9:00 AM")
+    page.locator(".inkmodal").get_by_role("button", name="Cancel").click()
+    step("scheduled times shown on the boxes and in the writing pad")
+    page.screenshot(path="/tmp/shots/15-student-form-schedule.png", full_page=False)
+    write_time(page, card, "Start time"); write_time(page, card, "Lunch out")
     card.get_by_role("button", name="Submit attendance").click()
-    expect(card.locator(".msg.err")).to_contain_text("write your lunch end time, write your end time, sign"); step("submit is never disabled; it says what is missing")
+    expect(card.locator(".msg.err")).to_contain_text("write your lunch in time, write your end time, sign"); step("submit is never disabled; it says what is missing")
     card.get_by_role("button", name="Cancel").click()
     fill_day(page, D(0), note="Forgot to sign on the day"); step("last Monday: start, lunch start, lunch end, end + signature, all by hand -> Pending")
     page.screenshot(path="/tmp/shots/03-student-confirmation.png", full_page=False)
@@ -130,7 +138,12 @@ with sync_playwright() as p:
     page.get_by_role("button", name="Approve excuse").click(); expect(page.locator(".msg.ok")).to_contain_text("Excused"); step("teacher opens and approves the excuse")
     page.get_by_role("button", name="Everyone").click()
     page.screenshot(path="/tmp/shots/05-teacher-roster-after.png", full_page=True)
-    page.get_by_role("link", name="Day").click(); page.wait_for_url("**view=day**"); page.wait_for_load_state("networkidle"); page.screenshot(path="/tmp/shots/06-teacher-day.png", full_page=True); step("day view")
+    page.get_by_role("link", name="Month", exact=True).click(); page.wait_for_url("**view=month**"); page.wait_for_load_state("networkidle")
+    expect(page.locator("table.monthgrid tbody tr")).to_have_count(3)
+    page.screenshot(path="/tmp/shots/16-teacher-month.png", full_page=True)
+    page.locator("table.monthgrid tbody tr", has_text="Jennifer Quezada").locator("a.mcell").first.click(); page.wait_for_url("**view=day**")
+    step("teacher month view; clicking a day opens it")
+    page.get_by_role("link", name="Day", exact=True).click(); page.wait_for_url("**view=day**"); page.wait_for_load_state("networkidle"); page.screenshot(path="/tmp/shots/06-teacher-day.png", full_page=True); step("day view")
     page.click("button:text('Sign out')"); page.wait_for_url("**/teacher/login")
 
     # ---- Student sees the results
@@ -139,6 +152,9 @@ with sync_playwright() as p:
     expect(page.locator("li.day", has_text=short(D(1)))).to_contain_text("End time should be 2:00 pm")
     expect(page.locator("li.day", has_text=short(D(2))).locator(".chip")).to_have_text("Excused"); step("student sees Approved, Needs correction, Excused")
     page.screenshot(path="/tmp/shots/07-student-after.png", full_page=True)
+    expect(page.locator(".history")).not_to_contain_text("Download PDF")
+    expect(page.locator(".history tr", has_text=D(0).strftime("%m/%d/%Y"))).to_contain_text("No: approved by your teacher")
+    step("student sees why a day is locked; no PDF needed")
     page.click("text=Done, sign out"); page.wait_for_url("**/student")
 
     # ---- Admin

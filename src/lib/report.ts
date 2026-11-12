@@ -187,7 +187,7 @@ async function pdfMonth(c: PdfCtx, sheet: SheetData) {
   text(page, `MONTH: ${monthTitle(sheet.month).toUpperCase()}`, L, y, 10, bold);
   y -= 6;
 
-  const cols = [{ t: "", w: 50 }, { t: "DATE", w: 54 }, { t: "START", w: 58 }, { t: "LUNCH START", w: 60 }, { t: "LUNCH END", w: 58 }, { t: "END", w: 58 }, { t: "STUDENT SIGNATURE", w: 97 }, { t: "TEACHER SIGNATURE", w: 97 }];
+  const cols = [{ t: "", w: 50 }, { t: "DATE", w: 54 }, { t: "START", w: 58 }, { t: "LUNCH OUT", w: 60 }, { t: "LUNCH IN", w: 58 }, { t: "END", w: 58 }, { t: "STUDENT SIGNATURE", w: 97 }, { t: "TEACHER SIGNATURE", w: 97 }];
   // Column headings as on the screen: bold on a light band, centred.
   const headH = 20, headSize = 7;
   y -= headH;
@@ -443,7 +443,7 @@ export async function buildDocx(report: Report): Promise<Buffer> {
     }));
     children.push(new Paragraph({ spacing: { before: 200, after: 100 }, children: [new TextRun({ text: `MONTH: ${monthTitle(sheet.month).toUpperCase()}`, bold: true })] }));
     const widths = [900, 1100, 1100, 1150, 1100, 1100, 1575, 1575];
-    const header = new TableRow({ tableHeader: true, children: ["", "DATE", "START", "LUNCH START", "LUNCH END", "END", "STUDENT SIGNATURE", "TEACHER SIGNATURE"].map((t, i) => cell(t, { width: widths[i], bold: true, size: 17, center: true, shade: true })) });
+    const header = new TableRow({ tableHeader: true, children: ["", "DATE", "START", "LUNCH OUT", "LUNCH IN", "END", "STUDENT SIGNATURE", "TEACHER SIGNATURE"].map((t, i) => cell(t, { width: widths[i], bold: true, size: 17, center: true, shade: true })) });
     const rows = sheet.rows.map((r) => {
       const v = rowCells(r);
       const first = [cell(v.day, { width: widths[0], size: 14 }), cell(v.date, { width: widths[1] })];

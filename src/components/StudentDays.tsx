@@ -37,7 +37,7 @@ function Img({ id, alt, h }: { id: string | null; alt: string; h: number }) {
 }
 
 /** This week and last week, one card per day. Tap a day to fill it in and sign it. */
-export function StudentDays({ weeks, teacherName }: { weeks: StudentWeek[]; teacherName: string | null }) {
+export function StudentDays({ weeks, teacherName, schedule }: { weeks: StudentWeek[]; teacherName: string | null; schedule: Schedule }) {
   const [open, setOpen] = useState<{ date: string; kind: "fill" | "excuse" } | null>(null);
   const [done, setDone] = useState<{ title: string; message: string } | null>(null);
   const router = useRouter();
@@ -106,7 +106,7 @@ export function StudentDays({ weeks, teacherName }: { weeks: StudentWeek[]; teac
                       )}
                     </div>
                   )}
-                  {isOpen && open.kind === "fill" && <DayForm day={d} teacherName={teacherName} onCancel={() => setOpen(null)} onDone={finish} />}
+                  {isOpen && open.kind === "fill" && <DayForm day={d} teacherName={teacherName} schedule={schedule} onCancel={() => setOpen(null)} onDone={finish} />}
                   {isOpen && open.kind === "excuse" && <ExcuseForm day={d} onCancel={() => setOpen(null)} onDone={finish} />}
                 </li>
               );
@@ -118,19 +118,20 @@ export function StudentDays({ weeks, teacherName }: { weeks: StudentWeek[]; teac
   );
 }
 
-/** The four times, written by hand, in the order of the paper sheet. */
+/** The four times, written by hand, in the order of the paper sheet, with the scheduled time as a guide. */
 const TIMES = [
-  { name: "startInk", label: "Start time", title: "Write the time you arrived", empty: "Tap to write", required: true },
-  { name: "lunchStartInk", label: "Lunch start", title: "Write the time your lunch break started", empty: "Tap to write", required: false },
-  { name: "lunchEndInk", label: "Lunch end", title: "Write the time your lunch break ended", empty: "Tap to write", required: false },
-  { name: "endInk", label: "End time", title: "Write the time you left", empty: "Tap to write", required: true },
+  { name: "startInk", label: "Start time", what: "the time you arrived", sched: "start", required: true },
+  { name: "lunchStartInk", label: "Lunch out", what: "the time you went to lunch", sched: "lunchOut", required: false },
+  { name: "lunchEndInk", label: "Lunch in", what: "the time you came back from lunch", sched: "lunchIn", required: false },
+  { name: "endInk", label: "End time", what: "the time you left", sched: "end", required: true },
 ] as const;
+export type Schedule = { start: string; lunchOut: string; lunchIn: string; end: string };
 
 /**
  * Fill in one day, all by hand: start, lunch start, lunch end, end, then sign. The button is never
  * greyed out: if something is missing, pressing it says exactly what.
  */
-function DayForm({ day, teacherName, onCancel, onDone }: { day: StudentDay; teacherName: string | null; onCancel: () => void; onDone: (m: string) => void }) {
+function DayForm({ day, teacherName, schedule, onCancel, onDone }: { day: StudentDay; teacherName: string | null; schedule: Schedule; onCancel: () => void; onDone: (m: string) => void }) {
   const [state, run, pending] = useActionState<ActionState, FormData>(submitDayAction.bind(null, day.date), {});
   const [ink, setInk] = useState<Record<string, InkValue>>({});
   const [sig, setSig] = useState<InkValue>(null);
@@ -140,7 +141,7 @@ function DayForm({ day, teacherName, onCancel, onDone }: { day: StudentDay; teac
   const check = (e: React.FormEvent) => {
     const m: string[] = [];
     if (!ink.startInk) m.push("write your start time");
-    if (!!ink.lunchStartInk !== !!ink.lunchEndInk) m.push(ink.lunchStartInk ? "write your lunch end time" : "write your lunch start time");
+    if (!!ink.lunchStartInk !== !!ink.lunchEndInk) m.push(ink.lunchStartInk ? "write your lunch in time" : "write your lunch out time");
     if (!ink.endInk) m.push("write your end time");
     if (!sig) m.push("sign");
     setMissing(m);
@@ -149,12 +150,14 @@ function DayForm({ day, teacherName, onCancel, onDone }: { day: StudentDay; teac
   return (
     <form action={run} onSubmit={check} className="dayform">
       {day.status === "NEEDS_CORRECTION" && day.correction && <p className="needs"><b>Your teacher says:</b> {day.correction}</p>}
-      <p className="small muted" style={{ marginTop: 0 }}>Write each time by hand, like on the paper sheet. Skip both lunch boxes if you had no lunch break.</p>
+      <p className="small muted" style={{ marginTop: 0 }}>Write each time by hand, like on the paper sheet. The scheduled time is shown as a guide; write the time you actually arrived, went to lunch, came back and left. Skip both lunch boxes if you had no lunch break.</p>
       <div className="timegrid">
         {TIMES.map((t) => (
           <div key={t.name} className={`timecell${fe[t.name] ? " bad" : ""}`}>
-            <InkField name={t.name} kind="time" label={t.label} title={t.title} hint="For example 9:00 or 12:30" emptyText={t.empty}
+            <InkField name={t.name} kind="time" label={t.label} title={`${t.label}: scheduled ${schedule[t.sched]}`}
+              hint={`Scheduled ${t.label.toLowerCase()} is ${schedule[t.sched]}. Write ${t.what}.`} emptyText="Tap to write"
               value={ink[t.name] ?? null} onChange={(v) => setInk((x) => ({ ...x, [t.name]: v }))} compact />
+            <span className="sched">Scheduled: <b>{schedule[t.sched]}</b></span>
             {!t.required && <span className="small muted">if you had lunch</span>}
             {fe[t.name] && <span className="err">{fe[t.name]}</span>}
           </div>

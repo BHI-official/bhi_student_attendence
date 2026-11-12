@@ -5,6 +5,11 @@ const schema = z.object({
   MONGODB_DB: z.string().optional(),
   SESSION_SECRET: z.string().min(32, "SESSION_SECRET must be at least 32 characters"),
   APP_TIMEZONE: z.string().default("America/New_York"),
+  /** The class schedule shown to students as a guide when they write their times. */
+  SCHEDULE_START: z.string().default("9:00 AM"),
+  SCHEDULE_LUNCH_OUT: z.string().default("12:00 PM"),
+  SCHEDULE_LUNCH_IN: z.string().default("12:30 PM"),
+  SCHEDULE_END: z.string().default("4:00 PM"),
   /** The shortest and longest day a student can record. */
   MIN_CLASS_MINUTES: z.coerce.number().int().min(1).max(240).default(5),
   MAX_CLASS_MINUTES: z.coerce.number().int().min(60).max(1440).default(720),

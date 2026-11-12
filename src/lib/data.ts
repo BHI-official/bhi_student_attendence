@@ -7,6 +7,10 @@ import { entriesHash } from "./hash";
 import { signatureImages } from "./signatures";
 
 export const today = () => todayIn(env().APP_TIMEZONE);
+
+/** The scheduled times shown to students as a guide (set in the environment; defaults 9:00 AM / 12:00 PM / 12:30 PM / 4:00 PM). */
+export const schedule = () => ({ start: env().SCHEDULE_START, lunchOut: env().SCHEDULE_LUNCH_OUT, lunchIn: env().SCHEDULE_LUNCH_IN, end: env().SCHEDULE_END });
+export type Schedule = ReturnType<typeof schedule>;
 export const thisMonth = () => today().slice(0, 7);
 
 /** The school's clock right now (or at an instant), in minutes since midnight, seconds dropped. */

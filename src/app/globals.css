@@ -388,3 +388,23 @@ tr.picked td { background: #eef1fb; }
 .excuse-decide input { min-height: 36px; padding: 4px 8px; border: 1.5px solid #9aa5b8; border-radius: 8px; min-width: 160px; }
 .excuse-decide .msg { margin: 6px 0 0; padding: 6px 10px; font-size: 14px; }
 a.filter { text-decoration: none; color: inherit; }
+.sched { display: block; font-size: 14px; color: var(--navy-deep); margin: 2px 0; }
+.schedline { background: #eef1fb; border-left: 5px solid var(--navy); padding: 8px 12px; border-radius: 6px; margin: 4px 0 10px; }
+
+/* Month view: one row per student, one column per class day */
+.monthgrid th, .monthgrid td { padding: 4px; text-align: center; }
+.monthgrid .mg-name { text-align: left; min-width: 180px; position: sticky; left: 0; background: var(--paper); z-index: 1; }
+.monthgrid th.mg-day { font-size: 12px; line-height: 1.2; min-width: 30px; }
+.monthgrid th.mg-day a { text-decoration: none; color: inherit; }
+.monthgrid .mg-sum { font-weight: 700; background: #f6f7fb; }
+.mcell { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 6px; font-weight: 700; font-size: 13px; text-decoration: none; border: 1.5px solid transparent; color: inherit; }
+.mcell.s-approved { background: #e6f4ea; color: var(--ok); border-color: #a9d8b8; }
+.mcell.s-pending { background: #fff3c4; color: #6b5300; border-color: #f0d36b; }
+.mcell.s-missing { background: #fde8e6; color: #9b1c12; border-color: #f4b4ad; }
+.mcell.s-needs_correction { background: #fdebd8; color: #8a4200; border-color: #f2bf8a; }
+.mcell.s-absent { background: #eef1f6; color: #3d4659; border-color: #c9d0dc; }
+.mcell.s-excused { background: #e7eefc; color: #2b4a9b; border-color: #b6c7ef; }
+.mcell.s-holiday, .mcell.s-none, .mcell.s-upcoming { background: transparent; color: var(--muted); }
+.mcell.has-excuse { box-shadow: 0 0 0 2px #e0a800; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; margin: 4px 0 10px; }
+.legend .mcell { width: 22px; height: 22px; font-size: 12px; }

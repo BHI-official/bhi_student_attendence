@@ -2,7 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { cols } from "@/lib/db";
 import { currentStudent } from "@/lib/auth";
-import { holidaysBetween, thisMonth, today } from "@/lib/data";
+import { holidaysBetween, schedule, thisMonth, today } from "@/lib/data";
 import { MONTH_RE, WEEKDAY_NAMES, addDays, isClassDay, monthDates, monthTitle, shiftMonth, usDate, weekday } from "@/lib/sheet";
 import { dayTimes } from "@/lib/roster";
 import { HandTimes } from "@/components/HandTimes";
@@ -66,7 +66,12 @@ export default async function MyAttendance({ searchParams }: { searchParams: Pro
   const monthBy = new Map(monthRows.map((e) => [e.date, e]));
   const history = monthDates(month).filter((d) => d <= now && isClassDay(student, d)).reverse().map((d) => {
     const e = monthBy.get(d) ?? null;
-    return { date: d, e, status: dayStatus(e, monthHolidays.has(d), d, now), locked: d < open || !!e?.staffSignature || !!signOff };
+    // Why the student can't change this day any more (shown in words, not just "Locked").
+    const locked = e?.staffSignature ? `Signed by ${e.staffSignature.staffName}`
+      : signOff ? `Locked: month signed off by ${signOff.staffName}`
+      : d < open ? "Locked: older than last week (ask the office)"
+      : null;
+    return { date: d, e, status: dayStatus(e, monthHolidays.has(d), d, now), locked };
   });
 
   return (
@@ -90,8 +95,9 @@ export default async function MyAttendance({ searchParams }: { searchParams: Pro
         <p className="msg ok">You&apos;re all caught up.</p>
       )}
 
-      <StudentDays weeks={weeks} teacherName={teacher?.name ?? null} />
-      <p className="small muted">You can fill in this week and last week. Older days and approved days are locked; ask an admin if something is wrong.</p>
+      <p className="schedline">Class schedule: <b>{schedule().start}</b> start · lunch <b>{schedule().lunchOut}</b> – <b>{schedule().lunchIn}</b> · <b>{schedule().end}</b> end</p>
+      <StudentDays weeks={weeks} teacherName={teacher?.name ?? null} schedule={schedule()} />
+      <p className="small muted">You can fill in or fix any day of <b>this week and last week</b> until your teacher signs it. After your teacher signs a day, or once it is older than last week, it is locked; ask the office if something is wrong.</p>
 
       <section className="history" aria-labelledby="hist">
         <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
@@ -100,12 +106,11 @@ export default async function MyAttendance({ searchParams }: { searchParams: Pro
             {month > firstMonth && <Link className="btn ghost sm" href={`/student/sheet?month=${shiftMonth(month, -1)}#hist`} aria-label="Previous month">‹</Link>}
             <strong>{monthTitle(month)}</strong>
             {month < thisMonth() && <Link className="btn ghost sm" href={`/student/sheet?month=${shiftMonth(month, 1)}#hist`} aria-label="Next month">›</Link>}
-            <a className="btn ghost sm" href={`/api/report/${student._id}?month=${month}&format=pdf`}>Download PDF</a>
           </div>
         </div>
         <div className="tablewrap">
           <table className="tbl">
-            <thead><tr><th>Day</th><th>Status</th><th>Times</th><th>Your signature</th><th>Teacher signature</th></tr></thead>
+            <thead><tr><th>Day</th><th>Status</th><th>Times</th><th>Your signature</th><th>Teacher signature</th><th>Can you change it?</th></tr></thead>
             <tbody>
               {history.map(({ date, e, status, locked }) => (
                 <tr key={date} className={status === "MISSING" ? "missing" : ""}>
@@ -115,10 +120,11 @@ export default async function MyAttendance({ searchParams }: { searchParams: Pro
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <td>{e?.studentSignature ? <img className="inkimg" src={`/api/ink/${e.studentSignature.id}`} alt="Your signature" height={26} /> : status === "MISSING" ? <span className="nosig">Not signed</span> : ""}</td>
                   {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <td>{e?.staffSignature ? <img className="inkimg" src={`/api/ink/${e.staffSignature.id}`} alt={`Signature of ${e.staffSignature.staffName}`} height={26} /> : <span className="small muted">{locked ? "Locked" : ""}</span>}</td>
+                  <td>{e?.staffSignature ? <img className="inkimg" src={`/api/ink/${e.staffSignature.id}`} alt={`Signature of ${e.staffSignature.staffName}`} height={26} /> : null}</td>
+                  <td className="small">{locked ? <span className="muted">{locked.startsWith("Signed") ? "No: approved by your teacher" : locked.replace("Locked: ", "No: ")}</span> : status === "UPCOMING" ? "" : <b>Yes, above</b>}</td>
                 </tr>
               ))}
-              {history.length === 0 && <tr><td colSpan={5} className="muted">No class days yet this month.</td></tr>}
+              {history.length === 0 && <tr><td colSpan={6} className="muted">No class days yet this month.</td></tr>}
             </tbody>
           </table>
         </div>

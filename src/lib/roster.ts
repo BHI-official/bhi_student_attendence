@@ -73,8 +73,8 @@ export function toRow(
 export function dayTimes(e: Pick<Entry, "startTime" | "endTime" | "startInkId" | "endInkId" | "lunchStartInkId" | "lunchEndInkId">) {
   return [
     { label: "Start", ink: e.startInkId ?? null, typed: e.startInkId ? "" : time12(e.startTime) },
-    { label: "Lunch start", ink: e.lunchStartInkId ?? null, typed: "" },
-    { label: "Lunch end", ink: e.lunchEndInkId ?? null, typed: "" },
+    { label: "Lunch out", ink: e.lunchStartInkId ?? null, typed: "" },
+    { label: "Lunch in", ink: e.lunchEndInkId ?? null, typed: "" },
     { label: "End", ink: e.endInkId ?? null, typed: e.endInkId ? "" : time12(e.endTime) },
   ].filter((t) => t.ink || t.typed);
 }
