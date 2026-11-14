@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { requireAdmin } from "@/lib/auth";
+import { cols } from "@/lib/db";
 import { studentScope } from "@/lib/access";
 import { courseNames, thisMonth } from "@/lib/data";
 import { thresholds } from "@/lib/policy";
@@ -19,7 +20,11 @@ export default async function Reports({ searchParams }: { searchParams: Promise<
   const rows = await classMonth(studentScope(staff), month, course || undefined);
   const t = thresholds();
   const qs = new URLSearchParams({ month, ...(course ? { course } : {}) }).toString();
-  const months = Array.from({ length: 12 }, (_, i) => shiftMonth(now, -i));
+  // Every month since the earliest course start (not just the last 12), newest first.
+  const first = (await (await cols()).students.find({}, { projection: { startDate: 1 } }).sort({ startDate: 1 }).limit(1).toArray())[0]?.startDate?.slice(0, 7);
+  const oldest = first && MONTH_RE.test(first) && first < month ? first : month;
+  const months: string[] = [];
+  for (let m = now; m >= oldest && months.length < 240; m = shiftMonth(m, -1)) months.push(m);
   const counts = { good: 0, attention: 0, poor: 0, none: 0 };
   rows.forEach((r) => counts[r.summary.level]++);
   return (

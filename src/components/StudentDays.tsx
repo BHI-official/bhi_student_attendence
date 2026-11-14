@@ -8,6 +8,7 @@ import { submitDayAction, uploadExcuseAction } from "@/actions/student";
 import { InkField, type InkValue } from "./Ink";
 import { HandTimes } from "./HandTimes";
 import { Msg } from "./forms";
+import { EXCUSE_ACCEPT, prepareExcuseFile } from "@/lib/shrinkPhoto";
 
 export type StudentDay = {
   date: string;
@@ -183,29 +184,62 @@ function DayForm({ day, teacherName, schedule, onCancel, onDone }: { day: Studen
 /** Upload a doctor's note or other document for an absence. */
 function ExcuseForm({ day, onCancel, onDone }: { day: StudentDay; onCancel: () => void; onDone: (m: string) => void }) {
   const [state, run, pending] = useActionState<ActionState, FormData>(uploadExcuseAction.bind(null, day.date), {});
+  // The file that will be uploaded: a big phone photo is shrunk first, in the browser.
   const [file, setFile] = useState<File | null>(null);
+  const [preparing, setPreparing] = useState(false);
+  const [fileMsg, setFileMsg] = useState<{ error?: string; note?: string }>({});
   useEffect(() => { if (state.ok && state.message) onDone(state.message); }, [state, onDone]);
-  const tooBig = !!file && file.size > 4 * 1024 * 1024;
+  const choose = async (f: File | null) => {
+    setFile(null);
+    setFileMsg({});
+    if (!f) return;
+    setPreparing(true);
+    const r = await prepareExcuseFile(f);
+    setPreparing(false);
+    if ("error" in r) setFileMsg({ error: r.error });
+    else { setFile(r.file); setFileMsg({ note: r.note ?? undefined }); }
+  };
+  const submit = (fd: FormData) => {
+    if (!file) return;
+    fd.set("file", file);
+    run(fd);
+  };
   return (
-    <form action={run} className="dayform">
+    <form action={submit} className="dayform">
       <h3>Excuse for {day.label}</h3>
-      <p className="small">Upload a doctor&apos;s note or other document (PDF, JPG or PNG, up to 4 MB). Your teacher reviews it. The day stays Absent until it&apos;s approved.</p>
+      <p className="small">Upload a doctor&apos;s note or other document: take a photo of it or choose a PDF. Your teacher reviews it. The day stays Absent until it&apos;s approved.</p>
       <div className="field">
-        <label htmlFor={`file-${day.date}`}>Document</label>
-        <input id={`file-${day.date}`} type="file" name="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" required
-          onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
-        {tooBig && <span className="err">That file is bigger than 4 MB.</span>}
+        <label htmlFor={`file-${day.date}`}>Photo or PDF of the note</label>
+        <input id={`file-${day.date}`} type="file" name="file" accept={EXCUSE_ACCEPT} required
+          onChange={(e) => void choose(e.target.files?.[0] ?? null)} />
+        {preparing && <span className="small">Getting the photo ready…</span>}
+        {fileMsg.note && <span className="small">{fileMsg.note}</span>}
+        {fileMsg.error && <span className="err">{fileMsg.error}</span>}
         {state.fieldErrors?.file && <span className="err">{state.fieldErrors.file}</span>}
       </div>
+      {file && file.type.startsWith("image/") && <PhotoPreview file={file} />}
       <div className="field">
         <label htmlFor={`why-${day.date}`}>Explanation (optional)</label>
         <textarea id={`why-${day.date}`} name="note" rows={2} maxLength={500} placeholder="e.g. I was sick" />
       </div>
       <Msg state={state.ok ? {} : state} />
       <div className="row">
-        <button className="btn big" disabled={pending || !file || tooBig}>{pending ? "Uploading…" : "Upload excuse"}</button>
+        <button className="btn big" disabled={pending || preparing || !file}>{pending ? "Uploading…" : "Upload excuse"}</button>
         <button type="button" className="btn ghost" onClick={onCancel}>Cancel</button>
       </div>
     </form>
   );
+}
+
+/** A small look at the photo before sending, so the student can see the note is readable. */
+function PhotoPreview({ file }: { file: File }) {
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => {
+    const u = URL.createObjectURL(file);
+    setUrl(u);
+    return () => URL.revokeObjectURL(u);
+  }, [file]);
+  if (!url) return null;
+  // eslint-disable-next-line @next/next/no-img-element
+  return <img src={url} alt="The photo you chose" style={{ maxWidth: "100%", maxHeight: 260, objectFit: "contain", border: "1px solid var(--line, #ccc)", borderRadius: 6, marginBottom: 12 }} />;
 }

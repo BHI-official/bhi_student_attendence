@@ -94,14 +94,14 @@ export type RosterQuery = { from: string; to: string; teacherId?: string; progra
 export async function loadRoster(staff: Staff, q: RosterQuery) {
   const { students, entries, staff: staffCol, approvals } = await cols();
   const isAdmin = staff.role === "ADMIN";
-  const filter = {
-    $and: [
-      studentScope(staff),
-      { active: true, startDate: { $lte: q.to }, endDate: { $gte: q.from } },
-      isAdmin && q.teacherId ? (q.teacherId === "none" ? { $or: [{ teacherId: null }, { teacherId: { $exists: false } }] } : { teacherId: q.teacherId }) : {},
-      q.program ? { courseName: q.program } : {},
-    ],
-  };
+  const scope = [
+    studentScope(staff),
+    { active: true, startDate: { $lte: q.to }, endDate: { $gte: q.from } },
+    isAdmin && q.teacherId ? (q.teacherId === "none" ? { $or: [{ teacherId: null }, { teacherId: { $exists: false } }] } : { teacherId: q.teacherId }) : {},
+  ];
+  const filter = { $and: [...scope, q.program ? { courseName: q.program } : {}] };
+  // Every class in scope (not only the one picked), so the class picker always lists them all.
+  const programs = ((await students.distinct("courseName", { $and: scope })) as string[]).filter(Boolean).sort();
   const list = await students.find(filter, { projection: { name: 1, nameLower: 1, courseName: 1, startDate: 1, endDate: 1, classDays: 1, teacherId: 1 } })
     .sort({ nameLower: 1 }).limit(3000).toArray();
   const [rows, holidays, teachers] = await Promise.all([
@@ -126,6 +126,5 @@ export async function loadRoster(staff: Staff, q: RosterQuery) {
       out.push(row);
     }
   }
-  const programs = [...new Set(list.map((s) => s.courseName).filter(Boolean))].sort();
   return { rows: out, programs, studentCount: list.length };
 }

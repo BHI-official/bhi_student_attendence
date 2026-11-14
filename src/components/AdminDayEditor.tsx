@@ -6,6 +6,7 @@ import { adminEditRowAction } from "@/actions/staff";
 import { InkField, type InkValue } from "./Ink";
 import { HandTimes } from "./HandTimes";
 import { Msg } from "./forms";
+import { EXCUSE_ACCEPT, prepareExcuseFile } from "@/lib/shrinkPhoto";
 
 export type DayValues = {
   date: string; status: "PRESENT" | "ABSENT" | "EXCUSED" | "HOLIDAY"; note: string; exists: boolean; hasStudentSignature: boolean;
@@ -23,9 +24,23 @@ export function AdminDayEditor({ studentId, initial }: { studentId: string; init
   const [status, setStatus] = useState(initial.status);
   const [ink, setInk] = useState<Record<string, InkValue>>({});
   const [state, run, pending] = useActionState<ActionState, FormData>((prev, fd) => adminEditRowAction(studentId, String(fd.get("date") ?? ""), prev, fd), {});
+  // An excuse photo is shrunk in the browser first (phone photos are often over the 4 MB limit).
+  const [doc, setDoc] = useState<{ file?: File; error?: string; note?: string; busy?: boolean }>({});
+  const chooseDoc = async (f: File | null) => {
+    if (!f) return setDoc({});
+    setDoc({ busy: true });
+    const r = await prepareExcuseFile(f);
+    setDoc("error" in r ? { error: r.error } : { file: r.file, note: r.note ?? undefined });
+  };
+  const submit = (fd: FormData) => {
+    if (doc.busy || (doc.error && (status === "EXCUSED" || status === "ABSENT"))) return;
+    if (doc.file && (status === "EXCUSED" || status === "ABSENT")) fd.set("file", doc.file);
+    else fd.delete("file");
+    run(fd);
+  };
   const fe = state.fieldErrors ?? {};
   return (
-    <form action={run} className="dayeditor">
+    <form action={submit} className="dayeditor">
       <input type="hidden" name="date" value={initial.date} />
       <div className="grid3">
         <div className="field">
@@ -67,8 +82,11 @@ export function AdminDayEditor({ studentId, initial }: { studentId: string; init
       </div>
       {(status === "EXCUSED" || status === "ABSENT") && (
         <div className="field">
-          <label htmlFor="ed-file">Excuse document (optional, PDF, JPG or PNG)</label>
-          <input id="ed-file" type="file" name="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" />
+          <label htmlFor="ed-file">Excuse document (optional: a photo of the note, or a PDF)</label>
+          <input id="ed-file" type="file" name="file" accept={EXCUSE_ACCEPT} onChange={(e) => void chooseDoc(e.target.files?.[0] ?? null)} />
+          {doc.busy && <span className="small">Getting the photo ready…</span>}
+          {doc.note && <span className="small">{doc.note}</span>}
+          {doc.error && <span className="err">{doc.error}</span>}
           {fe.file && <span className="err">{fe.file}</span>}
         </div>
       )}
@@ -76,7 +94,7 @@ export function AdminDayEditor({ studentId, initial }: { studentId: string; init
         <p className="small muted">The student&apos;s signature can&apos;t be added by staff. The day shows “signature missing” until the student signs it (this week or last week), or stays recorded without it.</p>
       )}
       <Msg state={state} />
-      <button className="btn" disabled={pending}>{pending ? "Saving…" : initial.exists ? "Save correction" : "Save day"}</button>
+      <button className="btn" disabled={pending || !!doc.busy}>{pending ? "Saving…" : initial.exists ? "Save correction" : "Save day"}</button>
     </form>
   );
 }
