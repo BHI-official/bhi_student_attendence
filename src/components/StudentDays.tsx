@@ -8,7 +8,6 @@ import { submitDayAction, uploadExcuseAction } from "@/actions/student";
 import { InkField, type InkValue } from "./Ink";
 import { HandTimes } from "./HandTimes";
 import { Msg } from "./forms";
-import { EXCUSE_ACCEPT, prepareExcuseFile } from "@/lib/shrinkPhoto";
 
 export type StudentDay = {
   date: string;
@@ -19,11 +18,15 @@ export type StudentDay = {
   status: DayStatus;
   times: { label: string; ink: string | null; typed: string }[];
   sig: string | null;
+  /** The admin who filled in and signed this day because the student missed it. */
+  sigByAdmin: string | null;
   approvedBy: string | null;
   approvedSig: string | null;
   signedOffBy: string | null;
   correction: string | null;
   markedPresent: boolean;
+  /** Not signed on the day itself: only an admin can fill it in now. */
+  missed: boolean;
   excuse: { status: "PENDING" | "APPROVED" | "REJECTED"; fileName: string; reason: string } | null;
   canSubmit: boolean;
   canExcuse: boolean;
@@ -31,6 +34,7 @@ export type StudentDay = {
 export type StudentWeek = { title: string; sub: string; days: StudentDay[] };
 
 const STUDENT_WORDS: Partial<Record<DayStatus, string>> = { MISSING: "Not signed yet", ABSENT: "Absent" };
+const wordFor = (d: StudentDay) => (d.missed ? "Missed" : STUDENT_WORDS[d.status] ?? STATUS_LABEL[d.status]);
 
 function Img({ id, alt, h }: { id: string | null; alt: string; h: number }) {
   // eslint-disable-next-line @next/next/no-img-element
@@ -75,10 +79,12 @@ export function StudentDays({ weeks, teacherName, schedule }: { weeks: StudentWe
                       {!d.classDay ? <span className="muted">No class</span>
                         : d.holiday ? <span className="muted">Holiday: {d.holiday}</span>
                         : d.status === "UPCOMING" ? <span className="muted">Upcoming</span>
-                        : <span className={`chip s-${d.status.toLowerCase()}`}>{STUDENT_WORDS[d.status] ?? STATUS_LABEL[d.status]}</span>}
+                        : <span className={`chip s-${d.status.toLowerCase()}`}>{wordFor(d)}</span>}
                       {d.status !== "ABSENT" && d.status !== "EXCUSED" && <HandTimes times={d.times} h={26} />}
-                      {d.sig && d.status !== "ABSENT" && <span className="ht"><span className="ht-label">Your signature</span><Img id={d.sig} alt="Your signature" h={34} /></span>}
-                      {d.approvedSig && d.status === "APPROVED" && <span className="ht"><span className="ht-label">Teacher</span><Img id={d.approvedSig} alt={`Signature of ${d.approvedBy}`} h={34} /></span>}
+                      {d.sig && d.status !== "ABSENT" && (d.sigByAdmin
+                        ? <span className="ht"><span className="ht-label">Signed by the office</span><Img id={d.sig} alt={`Signature of ${d.sigByAdmin} (admin)`} h={34} /></span>
+                        : <span className="ht"><span className="ht-label">Your signature</span><Img id={d.sig} alt="Your signature" h={34} /></span>)}
+                      {d.approvedSig && d.status === "APPROVED" && !d.sigByAdmin && <span className="ht"><span className="ht-label">Teacher</span><Img id={d.approvedSig} alt={`Signature of ${d.approvedBy}`} h={34} /></span>}
                     </div>
                     <div className="go">
                       {d.canSubmit && !isOpen && (
@@ -93,12 +99,14 @@ export function StudentDays({ weeks, teacherName, schedule }: { weeks: StudentWe
                       )}
                     </div>
                   </div>
-                  {(d.correction || d.approvedBy || d.excuse || d.signedOffBy || (d.markedPresent && d.status === "MISSING")) && (
+                  {(d.correction || d.approvedBy || d.excuse || d.signedOffBy || d.missed || (d.markedPresent && d.status === "MISSING")) && (
                     <div className="daynotes">
+                      {d.missed && <p className="small">You didn&apos;t sign this day. Only the office (an admin) can fill it in and sign it now.</p>}
                       {d.status === "NEEDS_CORRECTION" && d.correction && <p className="needs"><b>Your teacher says:</b> {d.correction}</p>}
-                      {d.status === "APPROVED" && d.approvedBy && <p className="small muted">Checked and signed by {d.approvedBy}. Locked.</p>}
+                      {d.status === "APPROVED" && d.sigByAdmin && <p className="small muted">Missed day, filled in and signed by the office ({d.sigByAdmin}). Locked.</p>}
+                      {d.status === "APPROVED" && d.approvedBy && !d.sigByAdmin && <p className="small muted">Checked and signed by {d.approvedBy}. Locked.</p>}
                       {d.signedOffBy && d.status !== "APPROVED" && <p className="small muted">This month is signed off by {d.signedOffBy}. Locked.</p>}
-                      {d.markedPresent && d.status === "MISSING" && <p className="small">You were marked present. Please fill in your times and sign.</p>}
+                      {d.markedPresent && d.status === "MISSING" && !d.missed && <p className="small">You were marked present. Please fill in your times and sign.</p>}
                       {d.excuse && (
                         <p className="small">
                           Excuse ({d.excuse.fileName}): <b>{d.excuse.status === "PENDING" ? "waiting for your teacher" : d.excuse.status.toLowerCase()}</b>
@@ -184,62 +192,29 @@ function DayForm({ day, teacherName, schedule, onCancel, onDone }: { day: Studen
 /** Upload a doctor's note or other document for an absence. */
 function ExcuseForm({ day, onCancel, onDone }: { day: StudentDay; onCancel: () => void; onDone: (m: string) => void }) {
   const [state, run, pending] = useActionState<ActionState, FormData>(uploadExcuseAction.bind(null, day.date), {});
-  // The file that will be uploaded: a big phone photo is shrunk first, in the browser.
   const [file, setFile] = useState<File | null>(null);
-  const [preparing, setPreparing] = useState(false);
-  const [fileMsg, setFileMsg] = useState<{ error?: string; note?: string }>({});
   useEffect(() => { if (state.ok && state.message) onDone(state.message); }, [state, onDone]);
-  const choose = async (f: File | null) => {
-    setFile(null);
-    setFileMsg({});
-    if (!f) return;
-    setPreparing(true);
-    const r = await prepareExcuseFile(f);
-    setPreparing(false);
-    if ("error" in r) setFileMsg({ error: r.error });
-    else { setFile(r.file); setFileMsg({ note: r.note ?? undefined }); }
-  };
-  const submit = (fd: FormData) => {
-    if (!file) return;
-    fd.set("file", file);
-    run(fd);
-  };
+  const tooBig = !!file && file.size > 4 * 1024 * 1024;
   return (
-    <form action={submit} className="dayform">
+    <form action={run} className="dayform">
       <h3>Excuse for {day.label}</h3>
-      <p className="small">Upload a doctor&apos;s note or other document: take a photo of it or choose a PDF. Your teacher reviews it. The day stays Absent until it&apos;s approved.</p>
+      <p className="small">Upload a doctor&apos;s note or other document (PDF, JPG or PNG, up to 4 MB). Your teacher reviews it. The day stays Absent until it&apos;s approved.</p>
       <div className="field">
-        <label htmlFor={`file-${day.date}`}>Photo or PDF of the note</label>
-        <input id={`file-${day.date}`} type="file" name="file" accept={EXCUSE_ACCEPT} required
-          onChange={(e) => void choose(e.target.files?.[0] ?? null)} />
-        {preparing && <span className="small">Getting the photo ready…</span>}
-        {fileMsg.note && <span className="small">{fileMsg.note}</span>}
-        {fileMsg.error && <span className="err">{fileMsg.error}</span>}
+        <label htmlFor={`file-${day.date}`}>Document</label>
+        <input id={`file-${day.date}`} type="file" name="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" required
+          onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+        {tooBig && <span className="err">That file is bigger than 4 MB.</span>}
         {state.fieldErrors?.file && <span className="err">{state.fieldErrors.file}</span>}
       </div>
-      {file && file.type.startsWith("image/") && <PhotoPreview file={file} />}
       <div className="field">
         <label htmlFor={`why-${day.date}`}>Explanation (optional)</label>
         <textarea id={`why-${day.date}`} name="note" rows={2} maxLength={500} placeholder="e.g. I was sick" />
       </div>
       <Msg state={state.ok ? {} : state} />
       <div className="row">
-        <button className="btn big" disabled={pending || preparing || !file}>{pending ? "Uploading…" : "Upload excuse"}</button>
+        <button className="btn big" disabled={pending || !file || tooBig}>{pending ? "Uploading…" : "Upload excuse"}</button>
         <button type="button" className="btn ghost" onClick={onCancel}>Cancel</button>
       </div>
     </form>
   );
-}
-
-/** A small look at the photo before sending, so the student can see the note is readable. */
-function PhotoPreview({ file }: { file: File }) {
-  const [url, setUrl] = useState<string | null>(null);
-  useEffect(() => {
-    const u = URL.createObjectURL(file);
-    setUrl(u);
-    return () => URL.revokeObjectURL(u);
-  }, [file]);
-  if (!url) return null;
-  // eslint-disable-next-line @next/next/no-img-element
-  return <img src={url} alt="The photo you chose" style={{ maxWidth: "100%", maxHeight: 260, objectFit: "contain", border: "1px solid var(--line, #ccc)", borderRadius: 6, marginBottom: 12 }} />;
 }

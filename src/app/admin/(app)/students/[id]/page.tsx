@@ -138,14 +138,15 @@ export default async function StudentProfilePage({ params, searchParams }: { par
             <p className="small">
               Now: <b>{STATUS_LABEL[dayStatus(editing, holidayMap.has(editDay), editDay, now)]}</b>
               {editing.status === "PRESENT" && editing.startTime ? `, ${time12(editing.startTime)}–${time12(editing.endTime)}` : ""}
-              {editing.studentSignature ? ", signed by the student" : ", no student signature"}
+              {editing.studentSignature?.addedBy ? `, missed day signed by admin ${editing.studentSignature.addedBy.staffName}` : editing.studentSignature ? ", signed by the student" : ", no student signature"}
               {editing.staffSignature ? `, approved by ${editing.staffSignature.staffName} (a change removes the approval)` : ""}.
             </p>
           )}
           <AdminDayEditor key={editDay} studentId={s._id} initial={{
             date: editDay, status: editing?.status ?? "PRESENT", note: editing?.note ?? "",
             times: editing?.status === "PRESENT" ? dayTimes(editing) : [],
-            exists: !!editing, hasStudentSignature: !!editing?.studentSignature,
+            exists: !!editing, hasStudentSignature: !!editing?.studentSignature && !editing.studentSignature.addedBy,
+            signedByAdmin: editing?.studentSignature?.addedBy?.staffName ?? null,
           }} />
           {editing && (
             <details style={{ marginTop: 12 }}>
@@ -198,7 +199,7 @@ export default async function StudentProfilePage({ params, searchParams }: { par
                     {e?.history?.some((h) => h.what.startsWith("admin:")) && <span className="tag">edited</span>}</td>
                   <td>{present ? <HandTimes times={dayTimes(e!)} h={22} /> : null}</td>
                   {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <td>{e?.studentSignature ? <img className="inkimg" src={`/api/ink/${e.studentSignature.id}`} alt="Student signature" height={30} loading="lazy" /> : st === "MISSING" ? <span className="nosig">Missing</span> : ""}</td>
+                  <td>{e?.studentSignature ? <><img className="inkimg" src={`/api/ink/${e.studentSignature.id}`} alt={e.studentSignature.addedBy ? `Signature of ${e.studentSignature.addedBy.staffName} (admin)` : "Student signature"} height={30} loading="lazy" />{e.studentSignature.addedBy && <span className="small muted block">Admin: {e.studentSignature.addedBy.staffName}</span>}</> : st === "MISSING" ? <span className="nosig">Missing</span> : ""}</td>
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <td className="small">{e?.staffSignature ? <><img className="inkimg" src={`/api/ink/${e.staffSignature.id}`} alt="" height={24} loading="lazy" /><span className="muted">{e.staffSignature.staffName}</span></> : ""}</td>
                   <td className="small">{e?.excuse ? <a href={`/api/excuse/${encodeURIComponent(e._id)}`} target="_blank" rel="noreferrer">{e.excuse.status.toLowerCase()}</a> : ""}</td>

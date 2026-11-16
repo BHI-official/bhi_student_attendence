@@ -73,6 +73,15 @@ export function dayStatus(e: StatusFields | null | undefined, holiday: boolean, 
 /** Can the student submit (or submit again) on a day with this status? */
 export const studentCanSubmit = (s: DayStatus) => s === "MISSING" || s === "PENDING" || s === "NEEDS_CORRECTION";
 
+/**
+ * A class day the student didn't sign on the day itself is "missed": only an admin can fill it in
+ * and sign it from then on (any date, no week limit). Today is never missed. Days the student did
+ * sign (pending, or sent back for correction) can still be fixed by the student as before.
+ */
+export const isMissed = (s: DayStatus, date: string, today: string) => s === "MISSING" && date < today;
+
+export const MISSED_MESSAGE = (date: string) => `You didn't sign on ${usDate(date)}. Only the office (an admin) can fill in and sign a missed day.`;
+
 /** Can the student upload an excuse for a day with this status? (Absent, or nothing submitted.) */
 export const studentCanExcuse = (s: DayStatus) => s === "ABSENT" || s === "MISSING";
 

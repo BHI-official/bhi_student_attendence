@@ -192,7 +192,9 @@ function RowView({ r, grouped, isAdmin, picked, onPick, pending, open, setOpen, 
         {!grouped && <td className="nowrap">{usDate(r.date)}</td>}
         <td className="hours">{r.times.length ? <HandTimes times={r.times} /> : <span className="muted">—</span>}</td>
         <td className="sigcell">
-          {r.sig ? <Ink id={r.sig} alt={`Signature of ${r.name}`} h={38} /> : r.status === "HOLIDAY" || r.status === "EXCUSED" || r.status === "ABSENT" ? <span className="muted">—</span> : <span className="nosig">No signature</span>}
+          {r.sig ? (r.sigByAdmin
+            ? <><Ink id={r.sig} alt={`Signature of ${r.sigByAdmin} (admin)`} h={38} /><span className="small muted block">Missed day, signed by admin {r.sigByAdmin}</span></>
+            : <Ink id={r.sig} alt={`Signature of ${r.name}`} h={38} />) : r.status === "HOLIDAY" || r.status === "EXCUSED" || r.status === "ABSENT" ? <span className="muted">—</span> : <span className="nosig">No signature</span>}
         </td>
         <td>
           <StatusChip status={r.status} mark={r.mark} />
@@ -211,7 +213,9 @@ function RowView({ r, grouped, isAdmin, picked, onPick, pending, open, setOpen, 
           {r.excuse?.status === "PENDING" || (isAdmin && r.excuse) ? <button type="button" className="btn sm ghost" onClick={() => setOpen(open === "excuse" ? null : "excuse")}>Review excuse</button> : null}
           {canMark && r.mark !== "PRESENT" && r.status !== "PENDING" && <button type="button" className="btn sm ghost" disabled={pending} onClick={() => onMark("PRESENT")}>Present</button>}
           {canMark && r.status !== "ABSENT" && <button type="button" className="btn sm ghost" disabled={pending} onClick={() => onMark("ABSENT")}>Absent</button>}
-          {isAdmin && <Link className="btn sm ghost" href={`/admin/students/${r.studentId}?day=${r.date}#edit`}>Edit</Link>}
+          {isAdmin && (r.status === "MISSING"
+            ? <Link className="btn sm" href={`/admin/students/${r.studentId}?day=${r.date}#edit`}>Fill in &amp; sign</Link>
+            : <Link className="btn sm ghost" href={`/admin/students/${r.studentId}?day=${r.date}#edit`}>Edit</Link>)}
           {r.locked && !isAdmin && (r.status === "MISSING" || r.signedOffBy) && <span className="small muted">Locked</span>}
         </td>
       </tr>

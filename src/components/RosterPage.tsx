@@ -26,15 +26,11 @@ export async function RosterPage({ staff, sp, base }: { staff: Staff; sp: Roster
   const to = view === "day" ? date : view === "month" ? (monthDays.at(-1) ?? `${month}-01`) : addDays(monday, 4) < now ? addDays(monday, 4) : now;
   const teachers = isAdmin ? await teacherList() : [];
   const teacherId = isAdmin && (sp.teacher === "none" || teachers.some((t) => t.id === sp.teacher)) ? sp.teacher : undefined;
-  const { rows: loaded, programs, studentCount: allCount } = await loadRoster(staff, { from, to, teacherId });
-  // One class at a time (a teacher with several classes, or an admin looking at one class).
-  const program = sp.program && programs.includes(sp.program) ? sp.program : undefined;
-  const rows = program ? loaded.filter((r) => r.program === program) : loaded;
-  const studentCount = program ? new Set(rows.map((r) => r.studentId)).size : allCount;
+  const { rows, programs, studentCount } = await loadRoster(staff, { from, to, teacherId, program: sp.program || undefined });
 
   const link = (o: Partial<RosterParams>) => {
     const p = new URLSearchParams();
-    const v = { view, date, teacher: teacherId, program, ...o };
+    const v = { view, date, teacher: teacherId, ...o };
     for (const [k, x] of Object.entries(v)) if (x) p.set(k, x);
     return `${base}?${p}`;
   };
@@ -67,7 +63,7 @@ export async function RosterPage({ staff, sp, base }: { staff: Staff; sp: Roster
         </div>
         <div className="stepper">
           <Link className="btn ghost sm" href={link({ date: view === "day" ? prevDay : view === "month" ? `${shiftMonth(month, -1)}-01` : addDays(monday, -7) })} aria-label={view === "day" ? "Previous day" : view === "month" ? "Previous month" : "Previous week"}>‹</Link>
-          <strong>{title}{program ? ` · ${program}` : ""}</strong>
+          <strong>{title}</strong>
           {(view === "day" ? nextDay <= now : view === "month" ? `${shiftMonth(month, 1)}-01` <= now : addDays(monday, 7) <= now)
             ? <Link className="btn ghost sm" href={link({ date: view === "day" ? nextDay : view === "month" ? `${shiftMonth(month, 1)}-01` : addDays(monday, 7) })} aria-label={view === "day" ? "Next day" : view === "month" ? "Next month" : "Next week"}>›</Link>
             : <span className="btn ghost sm" aria-disabled="true">›</span>}
@@ -76,28 +72,12 @@ export async function RosterPage({ staff, sp, base }: { staff: Staff; sp: Roster
         <form className="row" action={base}>
           <input type="hidden" name="view" value={view} />
           {teacherId && <input type="hidden" name="teacher" value={teacherId} />}
-          {program && <input type="hidden" name="program" value={program} />}
           <div className="field" style={{ margin: 0 }}>
             <label htmlFor="r-date">Go to date</label>
             <input id="r-date" type="date" name="date" defaultValue={date} max={now} />
           </div>
           <button className="btn ghost">Go</button>
         </form>
-        {programs.length > 1 && (
-          <form className="row" action={base}>
-            <input type="hidden" name="view" value={view} />
-            <input type="hidden" name="date" value={date} />
-            {teacherId && <input type="hidden" name="teacher" value={teacherId} />}
-            <div className="field" style={{ margin: 0 }}>
-              <label htmlFor="r-class">Class</label>
-              <select id="r-class" name="program" defaultValue={program ?? ""}>
-                <option value="">{isAdmin ? "All classes" : "All my classes"}</option>
-                {programs.map((p) => <option key={p} value={p}>{p}</option>)}
-              </select>
-            </div>
-            <button className="btn ghost">Show</button>
-          </form>
-        )}
         {isAdmin && (
           <form className="row" action={base}>
             <input type="hidden" name="view" value={view} />
@@ -127,7 +107,7 @@ export async function RosterPage({ staff, sp, base }: { staff: Staff; sp: Roster
       ) : (
         view === "month" ? (
           <MonthGrid rows={rows} dates={monthDays} isAdmin={isAdmin} dayHref={(d) => link({ view: "day", date: d })} />
-        ) : <Roster key={`${from}:${to}:${teacherId ?? ""}:${program ?? ""}`} rows={rows} isAdmin={isAdmin} programs={program ? [] : programs} grouped={view === "week"}
+        ) : <Roster key={`${from}:${to}:${teacherId ?? ""}`} rows={rows} isAdmin={isAdmin} programs={programs} grouped={view === "week"}
           takeDate={view === "day" && !isAdmin && date >= oldest ? date : null} />
       )}
     </main>

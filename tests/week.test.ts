@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  dayStatus, isWeekday, mondayOf, openFrom, safeFileName, sniffExcuse, studentCanExcuse, studentCanSubmit, studentLock, teacherLock, weekDates,
+  dayStatus, isMissed, isWeekday, mondayOf, openFrom, safeFileName, sniffExcuse, studentCanExcuse, studentCanSubmit, studentLock, teacherLock, weekDates,
 } from "../src/lib/week";
 
 // 2026-11-09 is a Monday.
@@ -65,4 +65,21 @@ test("excuse documents are recognised by their contents, not their name", () => 
   assert.equal(sniffExcuse(Buffer.from("GIF89a")), null);
   assert.equal(safeFileName('doctor"s note.exe', "application/pdf"), "doctors note.pdf");
   assert.equal(safeFileName("", "image/png"), "excuse.png");
+});
+
+test("a day the student didn't sign on the day is missed: only an admin can complete it", () => {
+  const today = "2026-11-12";
+  const sig = { id: "s", at: new Date() };
+  const staffSig = { ...sig, staffId: "a", staffName: "Admin" };
+  // Nothing recorded yesterday, or marked present by the teacher without a signature: missed.
+  assert.equal(isMissed(dayStatus(null, false, "2026-11-11", today), "2026-11-11", today), true);
+  assert.equal(isMissed(dayStatus({ status: "PRESENT", studentSignature: null, staffSignature: null }, false, "2026-11-11", today), "2026-11-11", today), true);
+  // Today is never missed; the student can still sign it.
+  assert.equal(isMissed(dayStatus(null, false, today, today), today, today), false);
+  // Signed days (pending, sent back) stay the student's to fix; approved, absent, holidays aren't missed.
+  assert.equal(isMissed(dayStatus({ status: "PRESENT", studentSignature: sig, staffSignature: null }, false, "2026-11-10", today), "2026-11-10", today), false);
+  assert.equal(isMissed(dayStatus({ status: "PRESENT", studentSignature: sig, staffSignature: null, correction: { byId: "t", byName: "T", at: new Date(), reason: "x" } }, false, "2026-11-10", today), "2026-11-10", today), false);
+  assert.equal(isMissed(dayStatus({ status: "PRESENT", studentSignature: { ...sig, addedBy: { staffId: "a", staffName: "Admin" } }, staffSignature: staffSig }, false, "2026-11-10", today), "2026-11-10", today), false);
+  assert.equal(isMissed(dayStatus({ status: "ABSENT", studentSignature: null, staffSignature: null }, false, "2026-11-10", today), "2026-11-10", today), false);
+  assert.equal(isMissed(dayStatus(null, true, "2026-11-10", today), "2026-11-10", today), false);
 });

@@ -43,6 +43,8 @@ function rowCells(r: SheetData["rows"][number]) {
     start: off ? "" : time12(e?.startTime ?? null), end: off ? "" : time12(e?.endTime ?? null),
     // Holidays carry no signatures, even if one was added before this rule.
     studentSig: holidayRow ? null : e?.studentSignature?.id ?? null, staffSig: holidayRow ? null : e?.staffSignature?.id ?? null,
+    // A missed day the admin signed: the signature is the admin's, so the sheet names them under it.
+    sigByAdmin: holidayRow ? null : e?.studentSignature?.addedBy?.staffName ?? null,
     // The student's handwritten time, printed in place of the typed one when there is one.
     startInk: off ? null : e?.startInkId ?? null, endInk: off ? null : e?.endInkId ?? null,
     lunchStartInk: off ? null : e?.lunchStartInkId ?? null, lunchEndInk: off ? null : e?.lunchEndInkId ?? null,
@@ -230,7 +232,10 @@ async function pdfMonth(c: PdfCtx, sheet: SheetData) {
     }
     for (const [i, id] of [[6, v.studentSig], [7, v.staffSig]] as const) {
       const img = await image(id, sheet.images);
-      if (img) { const d = fit(img.width, img.height, cols[i].w - 8, rowH - 3); page.drawImage(img, { x: xs[i] + (cols[i].w - d.w) / 2, y: y + (rowH - d.h) / 2, width: d.w, height: d.h }); }
+      const tag = i === 6 && v.sigByAdmin ? clip(`Admin: ${v.sigByAdmin}`, font, 5, cols[i].w - 4) : null;
+      const room = tag ? 6 : 0;
+      if (img) { const d = fit(img.width, img.height, cols[i].w - 8, rowH - 3 - room); page.drawImage(img, { x: xs[i] + (cols[i].w - d.w) / 2, y: y + room + (rowH - room - d.h) / 2, width: d.w, height: d.h }); }
+      if (tag) text(page, tag, xs[i] + 2, y + 1.5, 5);
     }
   }
   y -= 22;
@@ -455,7 +460,7 @@ export async function buildDocx(report: Report): Promise<Buffer> {
       const mid = v.off
         ? [cell(v.off.toUpperCase(), { span: 4, ink: true, bold: true, center: true, size: 20, width: sum(2, 5) })]
         : [timeCell(v.startInk, v.start, widths[2]), timeCell(v.lunchStartInk, "", widths[3]), timeCell(v.lunchEndInk, "", widths[4]), timeCell(v.endInk, v.end, widths[5])];
-      return new TableRow({ children: [...first, ...mid, cell(sigRun(v.studentSig, sheet.images, 75, 17), { width: widths[6] }), cell(sigRun(v.staffSig, sheet.images, 75, 17), { width: widths[7] })] });
+      return new TableRow({ children: [...first, ...mid, cell([...sigRun(v.studentSig, sheet.images, 75, 17), ...(v.sigByAdmin ? [new TextRun({ text: `Admin: ${v.sigByAdmin}`, size: 12, break: 1 })] : [])], { width: widths[6] }), cell(sigRun(v.staffSig, sheet.images, 75, 17), { width: widths[7] })] });
     });
     children.push(new Table({ width: { size: 9600, type: WidthType.DXA }, columnWidths: widths, rows: [header, ...rows] }));
     const a = sheet.approval;

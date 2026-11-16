@@ -19,6 +19,8 @@ export type RosterRow = {
   /** The four times as written by hand (image ids, shown through /api/ink/<id>), or typed by an admin. */
   times: { label: string; ink: string | null; typed: string }[];
   sig: string | null;
+  /** A missed day the admin filled in and signed: the admin's name (the signature is theirs). */
+  sigByAdmin: string | null;
   /** The teacher marked them present / absent (who). Present without a signature stays Missing. */
   mark: "PRESENT" | "ABSENT" | null;
   markedByName: string | null;
@@ -58,6 +60,7 @@ export function toRow(
     status,
     times: present ? dayTimes(e!) : [],
     sig: e?.studentSignature?.id ?? null,
+    sigByAdmin: e?.studentSignature?.addedBy?.staffName ?? null,
     // A present day without the student's signature (teacher's mark, or recorded by an admin).
     mark: e?.markedBy?.mark ?? (e?.status === "PRESENT" && !e.studentSignature ? "PRESENT" : null),
     markedByName: e?.markedBy?.staffName ?? null,
@@ -94,14 +97,14 @@ export type RosterQuery = { from: string; to: string; teacherId?: string; progra
 export async function loadRoster(staff: Staff, q: RosterQuery) {
   const { students, entries, staff: staffCol, approvals } = await cols();
   const isAdmin = staff.role === "ADMIN";
-  const scope = [
-    studentScope(staff),
-    { active: true, startDate: { $lte: q.to }, endDate: { $gte: q.from } },
-    isAdmin && q.teacherId ? (q.teacherId === "none" ? { $or: [{ teacherId: null }, { teacherId: { $exists: false } }] } : { teacherId: q.teacherId }) : {},
-  ];
-  const filter = { $and: [...scope, q.program ? { courseName: q.program } : {}] };
-  // Every class in scope (not only the one picked), so the class picker always lists them all.
-  const programs = ((await students.distinct("courseName", { $and: scope })) as string[]).filter(Boolean).sort();
+  const filter = {
+    $and: [
+      studentScope(staff),
+      { active: true, startDate: { $lte: q.to }, endDate: { $gte: q.from } },
+      isAdmin && q.teacherId ? (q.teacherId === "none" ? { $or: [{ teacherId: null }, { teacherId: { $exists: false } }] } : { teacherId: q.teacherId }) : {},
+      q.program ? { courseName: q.program } : {},
+    ],
+  };
   const list = await students.find(filter, { projection: { name: 1, nameLower: 1, courseName: 1, startDate: 1, endDate: 1, classDays: 1, teacherId: 1 } })
     .sort({ nameLower: 1 }).limit(3000).toArray();
   const [rows, holidays, teachers] = await Promise.all([
@@ -126,5 +129,6 @@ export async function loadRoster(staff: Staff, q: RosterQuery) {
       out.push(row);
     }
   }
+  const programs = [...new Set(list.map((s) => s.courseName).filter(Boolean))].sort();
   return { rows: out, programs, studentCount: list.length };
 }

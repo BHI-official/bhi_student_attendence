@@ -419,6 +419,14 @@ export async function adminEditRowAction(studentId: string, date: string, _: Act
       if ("error" in r) inkErrors[name] = r.error; else inks.push({ field, label, png: r.png });
     }
   }
+  // The admin's own handwritten signature for a day the student missed (only an admin signs those).
+  // It is saved as the admin's and always shown with the admin's name, never as the student's.
+  const sigRaw = present ? String(fd.get("adminSignature") ?? "") : "";
+  let adminSigPng: string | null = null;
+  if (sigRaw) {
+    const r = checkSignaturePng(sigRaw);
+    if ("error" in r) inkErrors.adminSignature = r.error; else adminSigPng = r.png;
+  }
   if (Object.keys(inkErrors).length) return { fieldErrors: inkErrors };
   // An optional document (an excuse for an older date, a note handed in on paper).
   const file = fd.get("file");
@@ -437,7 +445,18 @@ export async function adminEditRowAction(studentId: string, date: string, _: Act
   if (date < student.startDate || date > student.endDate) return { error: `${usDate(date)} is outside ${student.name}'s course dates.` };
   const id = `${studentId}:${date}`;
   const before = await col.findOne({ _id: id });
-  const changed = !before || before.status !== status.data || inks.length > 0 || (before.note ?? "") !== note || !!upload;
+  const adminSignedBefore = !!before?.studentSignature?.addedBy;
+  if (adminSigPng) {
+    if (before?.studentSignature && !adminSignedBefore) return { fieldErrors: { adminSignature: "The student signed this day themselves, so their signature stays." } };
+    // A missed day signed by the admin needs its times: start and end, and both lunch times or neither.
+    const has = (f: "startInkId" | "endInkId" | "lunchStartInkId" | "lunchEndInkId") => inks.some((i) => i.field === f) || !!before?.[f];
+    const missing: Record<string, string> = {};
+    if (!has("startInkId") && !before?.startTime) missing.startInk = "Write the start time.";
+    if (!has("endInkId") && !before?.endTime) missing.endInk = "Write the end time.";
+    if (has("lunchStartInkId") !== has("lunchEndInkId")) missing[has("lunchStartInkId") ? "lunchEndInk" : "lunchStartInk"] = "Write both lunch times, or neither if there was no lunch break.";
+    if (Object.keys(missing).length) return { error: Object.values(missing)[0], fieldErrors: missing };
+  }
+  const changed = !before || before.status !== status.data || inks.length > 0 || (before.note ?? "") !== note || !!upload || !!adminSigPng;
   if (!changed) return { ok: true, message: "Nothing changed." };
   if (before && reason.length < 3) return { fieldErrors: { reason: "Say why you're changing this day" } };
   const now = new Date();
@@ -457,14 +476,24 @@ export async function adminEditRowAction(studentId: string, date: string, _: Act
   // The admin's handwriting, saved as the admin's (the student's own stays in the history and audit log).
   const newInk: Record<string, string> = {};
   for (const i of inks) newInk[i.field] = await saveSignature("STAFF", staff._id, i.png, "DRAWN", staff._id, "TIME");
+  const adminSigId = adminSigPng ? await saveSignature("STAFF", staff._id, adminSigPng, "DRAWN", staff._id) : null;
   // The earlier handwriting stays in the audit log (with its image), so the history line stays readable.
   const replaced = inks.map((i) => i.label);
   const after = { status: status.data, minutes: null, note, ...(present ? {} : { startTime: null, endTime: null }) };
   const what = `admin: ${before ? word(before.status) : "nothing recorded"} → ${word(status.data)}`
     + (replaced.length ? `; rewrote by hand: ${replaced.join(", ")} (the earlier handwriting is kept)` : "")
-    + (before?.staffSignature ? ` (approval by ${before.staffSignature.staffName} removed)` : "") + (upload ? `; document ${upload.name}` : "");
+    + (before?.staffSignature ? ` (approval by ${before.staffSignature.staffName} removed)` : "") + (upload ? `; document ${upload.name}` : "")
+    + (adminSigId ? `; missed day signed by admin ${staff.name}` : adminSignedBefore ? "; earlier admin signature removed (sign again to complete the day)" : "");
   const setFields: Record<string, unknown> = {
-    ...after, staffSignature: null, correction: null, updatedAt: now,
+    ...after, correction: null, updatedAt: now,
+    // Admin signs a missed day: one handwritten signature completes it (shown as the admin's, with
+    // their name, in both signature columns) and the day is approved and locked. Any change to a day
+    // an admin signed earlier removes that signature until an admin signs again.
+    ...(adminSigId ? {
+      studentSignature: { id: adminSigId, at: now, addedBy: { staffId: staff._id, staffName: staff.name } },
+      staffSignature: { id: adminSigId, at: now, staffId: staff._id, staffName: staff.name },
+      filledLaterAt: date < today() ? now : null,
+    } : { staffSignature: null, ...(adminSignedBefore ? { studentSignature: null } : {}) }),
     // Each rewritten time replaces the old one (a typed time from earlier is dropped with it).
     ...newInk,
     ...(newInk.startInkId ? { startTime: null } : {}), ...(newInk.endInkId ? { endTime: null } : {}),
@@ -486,10 +515,11 @@ export async function adminEditRowAction(studentId: string, date: string, _: Act
       status: before.status, startTime: before.startTime, endTime: before.endTime, minutes: before.minutes, note: before.note,
       startInkId: before.startInkId ?? null, endInkId: before.endInkId ?? null, lunchStartInkId: before.lunchStartInkId ?? null, lunchEndInkId: before.lunchEndInkId ?? null, staffSignature: before.staffSignature ?? null, excuse: before.excuse ? { ...before.excuse } : null,
     } : null,
-    after: { ...after, rewrote: newInk }, document: upload?.name ?? null,
+    after: { ...after, rewrote: newInk, adminSignatureId: adminSigId }, document: upload?.name ?? null,
   });
   refresh();
-  return { ok: true, message: `${student.name}, ${usDate(date)} saved.${present && !before?.studentSignature ? " The student's signature stays missing until they sign." : ""}` };
+  if (adminSigId) return { ok: true, message: `${student.name}, ${usDate(date)} filled in and signed by you. The day is approved and locked.` };
+  return { ok: true, message: `${student.name}, ${usDate(date)} saved.${present && (!before?.studentSignature || adminSignedBefore) ? " No signature yet: sign in the admin signature box to complete a missed day." : ""}` };
 }
 
 /** A day off for one class: marks the day Holiday or Excused for everyone in the course. Admins only. */

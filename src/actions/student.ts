@@ -12,7 +12,7 @@ import { holidaysBetween } from "@/lib/data";
 import { DATE_RE, isClassDay, todayIn, usDate } from "@/lib/sheet";
 import { checkSignaturePng, checkTimePng, saveSignature } from "@/lib/signatures";
 import {
-  EXCUSE_MAX_BYTES, STATUS_LABEL, dayStatus, safeFileName, sniffExcuse, studentCanExcuse, studentCanSubmit, studentLock,
+  EXCUSE_MAX_BYTES, MISSED_MESSAGE, STATUS_LABEL, dayStatus, isMissed, safeFileName, sniffExcuse, studentCanExcuse, studentCanSubmit, studentLock,
 } from "@/lib/week";
 import type { ActionState } from "@/lib/action";
 
@@ -64,7 +64,8 @@ async function monthSigned(studentId: string, date: string) {
 /**
  * The student fills in one day, all by hand, like the paper sheet: start time, lunch start, lunch
  * end, end time, and their signature. A new signature every day, never reused. Lunch can be left
- * out (no lunch break), but not half of it. Works for today and any class day back to Monday of
+ * out (no lunch break), but not half of it. A new day can only be signed on the day itself (a missed
+ * day is filled in by an admin); a signed day can be changed again until approved, back to Monday of
  * last week, and again after the teacher sends it back. Once the teacher approves it (signing by
  * hand), or the admin signs off the month, the day is locked. One record per student per day.
  */
@@ -99,6 +100,8 @@ export async function submitDayAction(date: string, _: ActionState, fd: FormData
   if (signedOff) return { error: `${usDate(date)} is in a month ${signedOff.staffName} has already signed off, so it's locked. Ask an admin.` };
   const before = await entries.findOne({ _id: id });
   const status = dayStatus(before, false, date, today);
+  // A day not signed on the day itself can only be filled in and signed by an admin.
+  if (isMissed(status, date, today)) return { error: MISSED_MESSAGE(date) };
   if (!studentCanSubmit(status)) {
     if (status === "APPROVED") return { error: `${usDate(date)} is already approved by ${before?.staffSignature?.staffName ?? "your teacher"}, so it's locked.` };
     if (status === "ABSENT") return { error: `Your teacher marked you absent on ${usDate(date)}. If you have a document, use “Upload excuse”. Otherwise talk to your teacher.` };

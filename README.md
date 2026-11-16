@@ -7,10 +7,12 @@ The home page (`/`) has three buttons: **Student? Find your name here**, **Teach
 ## How it works
 
 **Student** — find your name, enter your PIN, and you see **this week** and **last week** (Monday to Friday).
-For any day up to today: tap **Fill in & sign**, write **by hand** your **start time, lunch start, lunch end and end
+On the day itself: tap **Fill in & sign**, write **by hand** your **start time, lunch start, lunch end and end
 time** (skip both lunch boxes if there was no lunch break), **sign by hand**, and submit. The Submit button is never
 greyed out: if something is missing, it says what. A confirmation shows, and the day goes to your teacher as **Pending**.
 Hours are not calculated. Every day needs a new handwritten signature; nothing is reused and nothing is uploaded as an image.
+A day the student didn't sign on the day shows **Missed**: only an admin can fill it in and sign it (see *Missed days*
+below). Days already signed can still be fixed until they are approved (for example after **Needs correction**).
 Absent? **Upload excuse** (PDF, JPG or PNG, 4 MB max, optional explanation). Older days and approved days are locked;
 the full history stays visible and downloads as a PDF.
 
@@ -49,6 +51,13 @@ Admins also see the same roster for every teacher (filter by teacher, or *Not as
   Reassigning changes only who manages the student: records, signatures, hours and approvals are untouched, approved
   days keep their original approver, pending days and new submissions go to the new teacher. Each assignment period is kept
   (student profile → Assignment history).
+- **Missed days** (only admins, any date, no week limit): on the roster a missed day has a **Fill in & sign** button
+  (or open the day on the student profile). Write the start and end time by hand (and both lunch times if there was a
+  break), then sign in **Admin signature for this missed day**. One handwritten signature completes the day: it is
+  approved and locked. The signature is saved as the admin's and is always shown with the admin's name (“Admin: …”)
+  in the student signature column, on screen and on the PDF/Word sheet, never as the student's. Teachers can't sign a
+  missed day. Changing a day an admin signed removes that signature until an admin signs again. A day the student
+  signed themselves can't be signed over.
 - **Student profile**: every day of the course month by month; **add or correct any day** (status, times, note, an excuse
   document) with a reason. The original values are kept in the day's history and the audit log. Staff can never add or imitate a
   student's signature. Admins can also reopen an approved day and change excuse decisions.
@@ -58,7 +67,8 @@ Admins also see the same roster for every teacher (filter by teacher, or *Not as
 
 | Student sees | Teacher/admin sees | Meaning |
 |---|---|---|
-| Not signed yet | Missing | Nothing submitted (or marked present without a signature) |
+| Not signed yet | Missing | Today, nothing submitted yet (or marked present without a signature) |
+| Missed | Missing | A past day the student didn't sign: only an admin can fill it in and sign it |
 | Pending | Pending | Submitted and signed, waiting for approval |
 | Approved | Approved | Checked and signed (by hand) by the teacher; locked |
 | Needs correction | Needs correction | Sent back; the student fixes it and signs again |
@@ -73,6 +83,8 @@ then “Approved by” (staff name/position, signature, comments) at the bottom.
 ### Rules that keep records safe
 - One record per student per day (database key `studentId:date`); submitting again updates it and keeps the earlier
   version in the day's history.
+- Staff never sign as the student. An admin's signature on a missed day is stored as the admin's own and labelled with
+  their name everywhere it appears.
 - Every signature and handwritten time is stored as its own image and never changed or deleted.
 - Excuse files are checked by their contents (real PDF/JPG/PNG), stored in the database, and only the student, their
   current teacher and admins can open them.

@@ -6,7 +6,7 @@ import { holidaysBetween, schedule, thisMonth, today } from "@/lib/data";
 import { MONTH_RE, WEEKDAY_NAMES, addDays, isClassDay, monthDates, monthTitle, shiftMonth, usDate, weekday } from "@/lib/sheet";
 import { dayTimes } from "@/lib/roster";
 import { HandTimes } from "@/components/HandTimes";
-import { STATUS_LABEL, dayStatus, mondayOf, openFrom, shortDay, studentCanExcuse, studentCanSubmit, weekDates } from "@/lib/week";
+import { STATUS_LABEL, dayStatus, isMissed, mondayOf, openFrom, shortDay, studentCanExcuse, studentCanSubmit, weekDates } from "@/lib/week";
 import { studentSignOutAction } from "@/actions/student";
 import { StudentDays, type StudentDay, type StudentWeek } from "@/components/StudentDays";
 import { AutoRefresh, IdleSignOut } from "@/components/Idle";
@@ -40,11 +40,12 @@ export default async function MyAttendance({ searchParams }: { searchParams: Pro
     const present = e?.status === "PRESENT";
     return {
       date, label: shortDay(date), isToday: date === now, classDay, holiday,
-      status, times: present ? dayTimes(e!) : [], sig: e?.studentSignature?.id ?? null,
+      status, times: present ? dayTimes(e!) : [], sig: e?.studentSignature?.id ?? null, sigByAdmin: e?.studentSignature?.addedBy?.staffName ?? null,
       approvedBy: e?.staffSignature?.staffName ?? null, approvedSig: e?.staffSignature?.id ?? null, signedOffBy, correction: e?.correction?.reason ?? null,
       markedPresent: present && !e?.studentSignature,
       excuse: e?.excuse ? { status: e.excuse.status, fileName: e.excuse.fileName, reason: e.excuse.reason ?? "" } : null,
-      canSubmit: editable && studentCanSubmit(status),
+      missed: classDay && !holiday && isMissed(status, date, now),
+      canSubmit: editable && studentCanSubmit(status) && !isMissed(status, date, now),
       canExcuse: editable && studentCanExcuse(status) && !(present && !e?.studentSignature && e?.markedBy?.mark === "PRESENT") && e?.excuse?.status !== "APPROVED",
     };
   };
@@ -67,11 +68,14 @@ export default async function MyAttendance({ searchParams }: { searchParams: Pro
   const history = monthDates(month).filter((d) => d <= now && isClassDay(student, d)).reverse().map((d) => {
     const e = monthBy.get(d) ?? null;
     // Why the student can't change this day any more (shown in words, not just "Locked").
-    const locked = e?.staffSignature ? `Signed by ${e.staffSignature.staffName}`
+    const status = dayStatus(e, monthHolidays.has(d), d, now);
+    const locked = e?.studentSignature?.addedBy ? `Locked: filled in and signed by the office (${e.studentSignature.addedBy.staffName})`
+      : e?.staffSignature ? `Signed by ${e.staffSignature.staffName}`
       : signOff ? `Locked: month signed off by ${signOff.staffName}`
+      : isMissed(status, d, now) ? "Locked: missed, only the office can fill it in"
       : d < open ? "Locked: older than last week (ask the office)"
       : null;
-    return { date: d, e, status: dayStatus(e, monthHolidays.has(d), d, now), locked };
+    return { date: d, e, status, locked };
   });
 
   return (
@@ -118,7 +122,7 @@ export default async function MyAttendance({ searchParams }: { searchParams: Pro
                   <td><span className={`chip s-${status.toLowerCase()}`}>{status === "MISSING" ? "Not signed" : STATUS_LABEL[status]}</span></td>
                   <td>{e?.status === "PRESENT" ? <HandTimes times={dayTimes(e)} h={22} /> : null}</td>
                   {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <td>{e?.studentSignature ? <img className="inkimg" src={`/api/ink/${e.studentSignature.id}`} alt="Your signature" height={26} /> : status === "MISSING" ? <span className="nosig">Not signed</span> : ""}</td>
+                  <td>{e?.studentSignature ? <><img className="inkimg" src={`/api/ink/${e.studentSignature.id}`} alt={e.studentSignature.addedBy ? `Signature of ${e.studentSignature.addedBy.staffName} (admin)` : "Your signature"} height={26} />{e.studentSignature.addedBy && <span className="small muted block">Signed by the office ({e.studentSignature.addedBy.staffName})</span>}</> : status === "MISSING" ? <span className="nosig">Not signed</span> : ""}</td>
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <td>{e?.staffSignature ? <img className="inkimg" src={`/api/ink/${e.staffSignature.id}`} alt={`Signature of ${e.staffSignature.staffName}`} height={26} /> : null}</td>
                   <td className="small">{locked ? <span className="muted">{locked.startsWith("Signed") ? "No: approved by your teacher" : locked.replace("Locked: ", "No: ")}</span> : status === "UPCOMING" ? "" : <b>Yes, above</b>}</td>
