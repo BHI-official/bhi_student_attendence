@@ -53,9 +53,10 @@ Admins also see the same roster for every teacher (filter by teacher, or *Not as
   (student profile → Assignment history).
 - **Missed days** (only admins, any date, no week limit): on the roster a missed day has a **Fill in & sign** button
   (or open the day on the student profile). Write the start and end time by hand (and both lunch times if there was a
-  break), then sign in **Admin signature for this missed day**. One handwritten signature completes the day: it is
-  approved and locked. The signature is saved as the admin's and is always shown with the admin's name (“Admin: …”)
-  in the student signature column, on screen and on the PDF/Word sheet, never as the student's. Teachers can't sign a
+  break), then sign **twice by hand**: once in **Admin signature: student column** and once in **Admin signature:
+  teacher column** (two separate signatures, so the two columns never show the same image). That completes the day: it
+  is approved and locked. Both signatures are saved as the admin's and always shown with the admin's name (“Admin: …”),
+  on screen and on the PDF/Word sheet, never as the student's. Teachers can't sign a
   missed day. Changing a day an admin signed removes that signature until an admin signs again. A day the student
   signed themselves can't be signed over.
 - **Student profile**: every day of the course month by month; **add or correct any day** (status, times, note, an excuse
@@ -83,8 +84,8 @@ then “Approved by” (staff name/position, signature, comments) at the bottom.
 ### Rules that keep records safe
 - One record per student per day (database key `studentId:date`); submitting again updates it and keeps the earlier
   version in the day's history.
-- Staff never sign as the student. An admin's signature on a missed day is stored as the admin's own and labelled with
-  their name everywhere it appears.
+- Staff never sign as the student. An admin's signatures on a missed day are stored as the admin's own and labelled with
+  their name everywhere they appear.
 - Every signature and handwritten time is stored as its own image and never changed or deleted.
 - Excuse files are checked by their contents (real PDF/JPG/PNG), stored in the database, and only the student, their
   current teacher and admins can open them.

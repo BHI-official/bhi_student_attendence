@@ -25,7 +25,7 @@ export async function GET(_: Request, { params }: { params: Promise<{ id: string
     else {
       const { entries, approvals } = await cols();
       // (also times an admin rewrote by hand on their days)
-      ok = !!(await entries.findOne({ studentId: student._id, $or: [{ "staffSignature.id": id }, { startInkId: id }, { endInkId: id }, { lunchStartInkId: id }, { lunchEndInkId: id }] }, { projection: { _id: 1 } }))
+      ok = !!(await entries.findOne({ studentId: student._id, $or: [{ "studentSignature.id": id }, { "staffSignature.id": id }, { startInkId: id }, { endInkId: id }, { lunchStartInkId: id }, { lunchEndInkId: id }] }, { projection: { _id: 1 } }))
         || !!(await approvals.findOne({ studentId: student._id, signatureId: id }, { projection: { _id: 1 } }));
     }
   }

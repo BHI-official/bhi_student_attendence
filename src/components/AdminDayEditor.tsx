@@ -27,6 +27,7 @@ export function AdminDayEditor({ studentId, initial }: { studentId: string; init
   const [status, setStatus] = useState(initial.status);
   const [ink, setInk] = useState<Record<string, InkValue>>({});
   const [sig, setSig] = useState<InkValue>(null);
+  const [teacherSig, setTeacherSig] = useState<InkValue>(null);
   const [state, run, pending] = useActionState<ActionState, FormData>((prev, fd) => adminEditRowAction(studentId, String(fd.get("date") ?? ""), prev, fd), {});
   const fe = state.fieldErrors ?? {};
   return (
@@ -78,20 +79,30 @@ export function AdminDayEditor({ studentId, initial }: { studentId: string; init
         </div>
       )}
       {status === "PRESENT" && !initial.hasStudentSignature && (
-        <div className={`field adminsig${fe.adminSignature ? " bad" : ""}`}>
-          <InkField name="adminSignature" kind="signature" label="Admin signature for this missed day"
-            title="Sign as admin for the missed day" hint="Your own signature. It is shown with your name, never as the student's."
-            value={sig} onChange={setSig} />
-          {fe.adminSignature && <span className="err">{fe.adminSignature}</span>}
+        <div className="field adminsig">
+          <div className="grid2">
+            <div className={`field${fe.adminSignature ? " bad" : ""}`}>
+              <InkField name="adminSignature" kind="signature" label="Admin signature: student column"
+                title="Sign as admin in the student column" hint="Your own signature. It is shown with your name, never as the student's."
+                value={sig} onChange={setSig} />
+              {fe.adminSignature && <span className="err">{fe.adminSignature}</span>}
+            </div>
+            <div className={`field${fe.adminTeacherSignature ? " bad" : ""}`}>
+              <InkField name="adminTeacherSignature" kind="signature" label="Admin signature: teacher column"
+                title="Sign as admin in the teacher column" hint="Sign again here, separately. This one goes in the teacher signature column."
+                value={teacherSig} onChange={setTeacherSig} />
+              {fe.adminTeacherSignature && <span className="err">{fe.adminTeacherSignature}</span>}
+            </div>
+          </div>
           <p className="small muted" style={{ margin: "4px 0 0" }}>
             {initial.signedByAdmin
-              ? `Signed by ${initial.signedByAdmin}. Saving any change removes that signature, so sign again here.`
-              : "The student didn't sign this day, so only an admin can complete it. Write the start and end time (and both lunch times if there was a break), then sign. The day is approved and locked, and the sheet shows your name next to the signature."}
+              ? `Signed by ${initial.signedByAdmin}. Saving any change removes those signatures, so sign both boxes again.`
+              : "The student didn't sign this day, so only an admin can complete it. Write the start and end time (and both lunch times if there was a break), then sign both boxes: one for the student column and one for the teacher column. The day is approved and locked, and the sheet shows your name next to each signature."}
           </p>
         </div>
       )}
       <Msg state={state} />
-      <button className="btn" disabled={pending}>{pending ? "Saving…" : sig && status === "PRESENT" ? "Sign and save day" : initial.exists ? "Save correction" : "Save day"}</button>
+      <button className="btn" disabled={pending}>{pending ? "Saving…" : sig && teacherSig && status === "PRESENT" ? "Sign and save day" : initial.exists ? "Save correction" : "Save day"}</button>
     </form>
   );
 }

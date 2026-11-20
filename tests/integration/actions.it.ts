@@ -47,6 +47,7 @@ function realPng(w: number, h: number) {
   return `data:image/png;base64,${png.toString("base64")}`;
 }
 const SIG = realPng(200, 60);
+const SIG2 = realPng(210, 60); // a second, different handwritten signature
 let week: any;
 let roster: any;
 
@@ -506,33 +507,39 @@ test("a missed day: only an admin fills it in and signs it, any date; the signat
   await asStaff(ids.saniya);
   assert.ok((await S.markRowsAction({}, fd({ rows: JSON.stringify([`${kim._id}:${recent}`]), mark: "PRESENT" }))).ok);
   assert.match((await S.approveRowsAction({}, fd({ rows: JSON.stringify([`${kim._id}:${recent}`]), signature: SIG }))).error, /no signed submission/);
-  assert.match((await S.adminEditRowAction(kim._id, recent, {}, fd({ status: "PRESENT", startInk: SIG, endInk: SIG, adminSignature: SIG }))).error, /Only an admin/);
+  assert.match((await S.adminEditRowAction(kim._id, recent, {}, fd({ status: "PRESENT", startInk: SIG, endInk: SIG, adminSignature: SIG, adminTeacherSignature: SIG2 }))).error, /Only an admin/);
 
   // The admin's signature needs the times: start and end, and lunch both-or-neither.
   await asStaff(ids.admin);
-  assert.ok((await S.adminEditRowAction(kim._id, old, {}, fd({ status: "PRESENT", startInk: SIG, adminSignature: SIG }))).fieldErrors?.endInk);
-  assert.match((await S.adminEditRowAction(kim._id, old, {}, fd({ status: "PRESENT", startInk: SIG, endInk: SIG, lunchStartInk: SIG, adminSignature: SIG }))).fieldErrors?.lunchEndInk ?? "", /both lunch times/);
+  assert.ok((await S.adminEditRowAction(kim._id, old, {}, fd({ status: "PRESENT", startInk: SIG, adminSignature: SIG, adminTeacherSignature: SIG2 }))).fieldErrors?.endInk);
+  assert.match((await S.adminEditRowAction(kim._id, old, {}, fd({ status: "PRESENT", startInk: SIG, endInk: SIG, lunchStartInk: SIG, adminSignature: SIG, adminTeacherSignature: SIG2 }))).fieldErrors?.lunchEndInk ?? "", /both lunch times/);
+  // Both columns need their own signature, and the teacher-column one can't be a copy of the other.
+  assert.match((await S.adminEditRowAction(kim._id, old, {}, fd({ status: "PRESENT", startInk: SIG, endInk: SIG, adminSignature: SIG }))).fieldErrors?.adminTeacherSignature ?? "", /teacher column/);
+  assert.match((await S.adminEditRowAction(kim._id, old, {}, fd({ status: "PRESENT", startInk: SIG, endInk: SIG, adminTeacherSignature: SIG2 }))).fieldErrors?.adminSignature ?? "", /student column/);
+  assert.match((await S.adminEditRowAction(kim._id, old, {}, fd({ status: "PRESENT", startInk: SIG, endInk: SIG, adminSignature: SIG, adminTeacherSignature: SIG }))).fieldErrors?.adminTeacherSignature ?? "", /separately/);
   assert.equal(await entry(kim._id, old), null, "nothing saved when something is missing");
 
   // Any date, old or recent: one handwritten admin signature completes and approves the day.
   for (const [d, extra] of [[old, {}], [recent, { lunchStartInk: SIG, lunchEndInk: SIG, reason: "Student forgot to sign; times confirmed by the teacher" }]] as const) {
-    const r = await S.adminEditRowAction(kim._id, d, {}, fd({ status: "PRESENT", startInk: SIG, endInk: SIG, adminSignature: SIG, ...extra }));
+    const r = await S.adminEditRowAction(kim._id, d, {}, fd({ status: "PRESENT", startInk: SIG, endInk: SIG, adminSignature: SIG, adminTeacherSignature: SIG2, ...extra }));
     assert.ok(r.ok, JSON.stringify(r));
     assert.match(r.message, /filled in and signed by you/);
     const e: any = await entry(kim._id, d);
     assert.equal(week.dayStatus(e, false, d, today), "APPROVED");
     assert.equal(e.studentSignature.addedBy.staffName, "Ada Admin", "marked as the admin's signature, never the student's");
     assert.equal(e.staffSignature.staffName, "Ada Admin");
-    assert.equal(e.staffSignature.id, e.studentSignature.id, "one signature");
-    const sig: any = await db.collection("signatures").findOne({ _id: e.studentSignature.id });
-    assert.equal(sig.ownerType, "STAFF");
-    assert.equal(sig.ownerId, ids.admin);
+    assert.notEqual(e.staffSignature.id, e.studentSignature.id, "two separate signatures, one per column");
+    for (const id of [e.studentSignature.id, e.staffSignature.id]) {
+      const sig: any = await db.collection("signatures").findOne({ _id: id });
+      assert.equal(sig.ownerType, "STAFF");
+      assert.equal(sig.ownerId, ids.admin);
+    }
     assert.match(e.history.at(-1).what, /missed day signed by admin Ada Admin/);
   }
   const rec: any = await entry(kim._id, recent);
   assert.ok(rec.lunchStartInkId && rec.lunchEndInkId);
   assert.ok(rec.filledLaterAt, "flagged as filled in after the day");
-  assert.ok(await db.collection("audit_logs").findOne({ action: "admin.edit_day", target: `${kim._id}:${recent}`, "meta.after.adminSignatureId": rec.studentSignature.id }));
+  assert.ok(await db.collection("audit_logs").findOne({ action: "admin.edit_day", target: `${kim._id}:${recent}`, "meta.after.adminSignatureId": rec.studentSignature.id, "meta.after.adminTeacherSignatureId": rec.staffSignature.id }));
 
   // Roster shows the admin's name with it; the student sees it on their sheet and can't change the day.
   const row: any = (await roster.loadRoster(await db.collection("staff").findOne({ _id: ids.admin as any }), { from: recent, to: recent })).rows.find((x: any) => x.studentId === kim._id);
@@ -540,6 +547,7 @@ test("a missed day: only an admin fills it in and signs it, any date; the signat
   const inkRoute = await import("../../src/app/api/ink/[id]/route");
   await asStudent(kim._id);
   assert.equal((await inkRoute.GET(new Request("http://x"), { params: Promise.resolve({ id: rec.studentSignature.id }) })).status, 200);
+  assert.equal((await inkRoute.GET(new Request("http://x"), { params: Promise.resolve({ id: rec.staffSignature.id }) })).status, 200);
   assert.match((await ST.submitDayAction(recent, {}, day())).error, /already approved by Ada Admin/);
 
   // Changing a day the admin signed takes the signature off until an admin signs again.
@@ -549,7 +557,7 @@ test("a missed day: only an admin fills it in and signs it, any date; the signat
   assert.equal(e.studentSignature, null);
   assert.equal(e.staffSignature, null);
   assert.equal(week.dayStatus(e, false, old, today), "MISSING");
-  assert.ok((await S.adminEditRowAction(kim._id, old, {}, fd({ status: "PRESENT", adminSignature: SIG, reason: "Signed again" }))).ok, "the times are still there, so a signature is enough");
+  assert.ok((await S.adminEditRowAction(kim._id, old, {}, fd({ status: "PRESENT", adminSignature: SIG, adminTeacherSignature: SIG2, reason: "Signed again" }))).ok, "the times are still there, so a signature is enough");
   e = await entry(kim._id, old);
   assert.equal(week.dayStatus(e, false, old, today), "APPROVED");
 
@@ -557,7 +565,7 @@ test("a missed day: only an admin fills it in and signs it, any date; the signat
   await asStudent(kim._id);
   assert.ok((await submit(lastThu, day())).ok);
   await asStaff(ids.admin);
-  assert.match((await S.adminEditRowAction(kim._id, lastThu, {}, fd({ status: "PRESENT", adminSignature: SIG, reason: "x" }))).fieldErrors?.adminSignature ?? "", /signed this day themselves/);
+  assert.match((await S.adminEditRowAction(kim._id, lastThu, {}, fd({ status: "PRESENT", adminSignature: SIG, adminTeacherSignature: SIG2, reason: "x" }))).fieldErrors?.adminSignature ?? "", /signed this day themselves/);
   assert.equal(((await entry(kim._id, lastThu)) as any).studentSignature.addedBy, undefined);
 
   // Reports print it (with the admin's name).
